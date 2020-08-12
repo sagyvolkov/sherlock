@@ -1,0 +1,27 @@
+#!/bin/bash
+
+if [[ $# -eq 0 || $# -ne 2 ]]; then
+ echo "Usage : $0 <run name> <number of loops>"
+ exit 1
+fi
+
+readonly BASE_DIR=$(pwd)
+readonly RUN_NAME=${1}
+readonly LOOPS=${2}
+
+if [[ ! -d "${RUN_NAME}" ]]; then
+  mkdir -p "${RUN_NAME}"
+fi
+pushd ${RUN_NAME}
+for ((i=1; i<=${LOOPS}; i++))
+do
+  ${BASE_DIR}/run_database_workload-parallel sysbench run run${i}
+  sleep 60
+  oc delete jobs --all
+done
+#for ((i=1; i<=${LOOPS}; i++))
+#do
+  #echo "run${i},$(${BASE_DIR}/print_sysbench_results run${i} true)"
+#  echo ""
+#done
+#popd

@@ -1,0 +1,145 @@
+#!/bin/bash
+
+readonly KUBE_CMD=oc
+readonly PVC_SIZE=500Gi
+readonly WORKERS_LIST_FILE=~/workers
+readonly OCS_LIST_FILE=~/ocs_nodes
+readonly DB_POD_PREFIX=postgresql
+readonly DB_PVC_PREFIX=postgresql-pvc
+readonly NUMBER_OF_WORKERS=2
+readonly DB_PER_WORKER=9
+readonly DB_POD_MEM=16Gi
+readonly DB_POD_CPU=4
+readonly DB_NAME=redhat
+readonly DB_USERNAME=redhat
+readonly DB_PASSWORD=redhat
+readonly STORAGE_CLASS=ocs-storagecluster-ceph-rbd
+#readonly STORAGE_CLASS=rook-ceph-block
+readonly PROJECT_NAME=postgresql
+
+if [ "$(uname -s)" == "Linux" ];then
+  if [[ "${WORKERS_LIST_FILE}" == "${OCS_LIST_FILE}" ]]; then
+    mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
+  else
+    mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
+    mapfile -t ocs_node_array < <(cat ${OCS_LIST_FILE})
+  fi
+else
+  if [[ "${WORKERS_LIST_FILE}" == "${OCS_LIST_FILE}" ]]; then
+    declare -a worker_node_array
+    while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+  else
+    declare -a worker_node_array
+    while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+    declare -a ocs_node_array
+    while IFS= read -r line; do ocs_node_array+=("$line"); done < <(cat ${OCS_LIST_FILE})
+  fi
+fi
+
+function create_postgresql_service()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${pod_name}
+  labels:
+    app: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  type: NodePort
+  ports:
+   - port: 5432
+  selector:
+   app: ${pod_name}
+EOF
+}
+
+function create_pvc()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  storageClassName: ${STORAGE_CLASS}
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${PVC_SIZE}
+EOF
+}
+
+function create_postgresql()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${pod_name}
+  template:
+    metadata:
+      labels:
+        app: ${pod_name}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+      - name: ${pod_name}
+        image: postgres:11.7
+#        args: ["-c", "max_connections=100" , "-c", "shared_buffers=4096MB"]
+        imagePullPolicy: "Always"
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: postgresqldb
+        env:
+          - name: POSTGRES_PASSWORD
+            value: ${DB_PASSWORD}
+          - name: POSTGRES_USER
+            value: ${DB_USERNAME}
+          - name: POSTGRES_DB
+            value: ${DB_NAME}
+          - name: PGDATA
+            value: /var/lib/postgresql/data/pgdata
+        resources:
+          requests:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+          limits:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+      volumes:
+      - name: postgresqldb
+        persistentVolumeClaim:
+          claimName: ${pvc_name}
+EOF
+}
+
+for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+do
+  node_number=$((j%NUMBER_OF_WORKERS))
+  node_name=${worker_node_array[${node_number}]}
+  pvc_name=${DB_PVC_PREFIX}-${j}
+  pod_name=${DB_POD_PREFIX}-${j}
+  echo "creating PostgreSQL pod ${pod_name} on node ${node_name}"
+  create_pvc
+  create_postgresql
+  create_postgresql_service
+  ${KUBE_CMD} wait --for=condition=Ready $(${KUBE_CMD} get pod -l app=${pod_name} -o name)
+done
