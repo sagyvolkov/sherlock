@@ -1,77 +1,86 @@
 #!/bin/bash
 
-readonly BENCHMARK_PROGRAM=${1}
-readonly JOB_TYPE=${2}
-readonly RUN_NAME=${3}
+while getopts b:j:c:n: flag
+do
+    case "${flag}" in
+        b) readonly BENCHMARK_TOOL=${OPTARG};;
+        j) readonly JOB_TYPE=${OPTARG};;
+        c) readonly CONFIG_FILE=${OPTARG};;
+        n) readonly RUN_NAME=${OPTARG};;
+    esac
+done
 
-# workload related
-readonly WORKLOAD_RUNTIME=600
-readonly THREADS=10
-readonly CLIENTS=10
-readonly DB_POD_PREFIX=postgresql
-readonly DB_TYPE=pgsql
-readonly OUTPUT_INTERVAL=10
-readonly DB_USERNAME=redhat
-readonly DB_PASSWORD=redhat
-readonly DB_NAME=redhat
-readonly SYSBENCH_NUMBER_OF_TABLES=400
-#readonly SYSBENCH_ROWS_IN_TABLE=10000
-readonly SYSBENCH_ROWS_IN_TABLE=1000000
-readonly SYSBENCH_NUMBER_OF_INSERTS=1
-readonly SYSBENCH_NUMBER_OF_UPDATES=1
-readonly SYSBENCH_NUMBER_OF_NON_INDEX_UPDATES=1
-readonly SYSBENCH_READ_ONLY=off
-readonly SYSBENCH_WRITE_ONLY=off
-readonly PGBENCH_WORKLOAD_TYPE=70r30w # simple, 90r10w, 70r30w, or readonly
-readonly PGBENCH_RUN_TYPE=time
-readonly PGBENCH_RUN_TYPE_VAR=${WORKLOAD_RUNTIME}
-readonly PGBENCH_VACUUM=yes
-readonly PGBENCH_QUIET=no
-readonly PGBENCH_SCALE=7000
-readonly PGBENCH_READ_ONLY=no
+if [[ -z ${BENCHMARK_TOOL} || -z ${JOB_TYPE} ]]; then
+  echo "Usage : $0 -b (benchmark tool) <sysbench or pgbench> -j (job type) <prepare, run or cleanup(sysbench only)> -c config file via full path [-n <optional dir name to keep run logs>]"
+  exit 1
+fi
 
-# cluster related
-readonly KUBE_CMD=oc
-readonly NUMBER_OF_WORKERS=2
-readonly DB_PER_WORKER=9
-readonly OCS_DEVICES="nvme1n1 nvme2n1 nvme3n1 nvme4n1 nvme6n1 nvme7n1 nvme8n1 nvme9n1"
-readonly OCS_NETWORK_INTERFACES="enp216s0f0"
-readonly STATS_INTERVAL=10
-readonly STATS_COUNT=$(((WORKLOAD_RUNTIME+10)/STATS_INTERVAL))
-readonly WORKERS_LIST_FILE=~/workers
-readonly OCS_LIST_FILE=~/ocs_nodes
-readonly PROJECT_NAME=postgresql
-readonly STATS=true
-
+source ${CONFIG_FILE}
 
 declare -A jobs_pods
-if [[ "${WORKERS_LIST_FILE}" == "${OCS_LIST_FILE}" ]]; then
-  mapfile -t worker_node_array < ${WORKERS_LIST_FILE}
+declare -A worker_rbd
+
+
+if [ "$(uname -s)" == "Linux" ];then
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+    mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
+  else
+    mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
+    mapfile -t sds_node_array < <(cat ${SDS_LIST_FILE})
+  fi
 else
-  mapfile -t worker_node_array < ${WORKERS_LIST_FILE}
-  mapfile -t ocs_node_array < ${OCS_LIST_FILE}
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+    declare -a worker_node_array
+    while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+  else
+    declare -a worker_node_array
+    while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+    declare -a sds_node_array
+    while IFS= read -r line; do sds_node_array+=("$line"); done < <(cat ${SDS_LIST_FILE})
+  fi
 fi
 
-# TODO: find a sane way to find out what rbd device is being used for the postgresql pod.
-# this is just a hardcoded  workaround that need to be updated whenever creating new databases
-declare -A worker_psql_rbd
-worker_psql_rbd[worker0.ocp4.example.com]="rbd0 rbd1 rbd2 rbd3 rbd4 rbd5 rbd6 rbd7 rbd8"
-worker_psql_rbd[worker1.ocp4.example.com]="rbd0 rbd1 rbd2 rbd3 rbd4 rbd5 rbd6 rbd7 rbd8"
-#worker_psql_rbd[worker0.ocp4.example.com]="rbd0 rbd1 rbd2 rbd3 rbd4 rbd5 rbd6 rbd7 rbd8 rbd9 rbd10 rbd11 rbd12 rbd13 rbd14 rbd15 rbd16 rbd17 rbd18 rbd19"
-#worker_psql_rbd[worker1.ocp4.example.com]="rbd0 rbd1 rbd2 rbd3 rbd4 rbd5 rbd6 rbd7 rbd8 rbd9 rbd10 rbd11 rbd12 rbd13 rbd14 rbd15 rbd16 rbd17 rbd18 rbd19"
+function mydate()
+{
+ date +%Y%m%d:%H:%M:%S:
+}
 
-
-if [[ $# -eq 0 || $# -ne 3 ]]; then
- echo "Usage : $0 <sysbench or pgbench> <job type: prepare, run or cleanup(sysbench only)> <directory to keep run logs>"
- exit 1
-fi
+function get_rbd_list()
+{
+  declare -A pvc_array
+  for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+  do
+    deployment_name=${DB_POD_PREFIX}-${j}
+    claim_name=$(oc get deployment ${deployment_name} -o yaml |grep claimName|awk '{print $2}')
+    volume_name=$(oc get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
+    pvc_array[${j}]=${volume_name}
+  done
+  for node_name in $(cat $WORKERS_LIST_FILE)
+  do
+    local_node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+    rbd_line=""
+    node_pvc=$(oc debug node/${node_name} -- lsblk | grep rbd | awk '{print $1"@@"$7}')
+    for lsblk_line in $(echo ${node_pvc})
+    do
+      pvc="pvc-$(echo $lsblk_line | awk -F'@@' '{print $2}' | awk -F"pvc-" '{print $2}' | tr -d '/mount')"
+      for pvc_volume in ${pvc_array[@]}
+      do
+        if [[ "${pvc}" == "${pvc_volume}" ]]; then
+          rbd_line+=" $(echo $lsblk_line | awk -F'@@' '{print $1}')"
+        fi
+      done
+    done
+    rbd_line=${rbd_line#?}
+    worker_rbd[${local_node_name}]=${rbd_line}
+  done
+}
 
 function run_db_workload()
 {
   local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   local db_ip="${1}"
   local node_type="${2}"
-  if [[ "${BENCHMARK_PROGRAM}" == "sysbench" ]]; then
+  if [[ "${BENCHMARK_TOOL}" == "sysbench" ]]; then
     run_command="./run_sysbench ${JOB_TYPE} ${WORKLOAD_RUNTIME} ${THREADS} ${SYSBENCH_READ_ONLY} ${SYSBENCH_WRITE_ONLY} ${db_ip} ${OUTPUT_INTERVAL} ${SYSBENCH_ROWS_IN_TABLE} ${SYSBENCH_NUMBER_OF_TABLES} ${DB_TYPE} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${SYSBENCH_NUMBER_OF_INSERTS} ${SYSBENCH_NUMBER_OF_UPDATES} ${SYSBENCH_NUMBER_OF_NON_INDEX_UPDATES}"
   else
     if [[ "${JOB_TYPE}" == "prepare" ]]; then
@@ -80,12 +89,12 @@ function run_db_workload()
       run_command="./run_pgbench ${PGBENCH_WORKLOAD_TYPE} ${db_ip} ${CLIENTS} ${THREADS} ${PGBENCH_RUN_TYPE} ${PGBENCH_RUN_TYPE_VAR} ${PGBENCH_VACUUM} ${PGBENCH_QUIET} ${PGBENCH_SCALE} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${OUTPUT_INTERVAL} ${PGBENCH_READ_ONLY}"
     fi
   fi
-  echo "run_command=${run_command}"
+  if ${DEBUG}; then echo "$(mydate)-run_command=${run_command}";fi
   job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: ${BENCHMARK_PROGRAM}-${JOB_TYPE}-${deployment_name}-${RUN_NAME}-
+  generateName: ${BENCHMARK_TOOL}-${JOB_TYPE}-${deployment_name}-${RUN_NAME}-
 spec:
   template:
     spec:
@@ -94,7 +103,7 @@ spec:
         kubernetes.io/hostname: ${node_name}
       containers:
         - image: quay.io/sagyvolkov/benchmark-container:0.87
-          name: ${BENCHMARK_PROGRAM}-${JOB_TYPE}
+          name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
             limits:
               memory: 2Gi
@@ -135,7 +144,7 @@ spec:
           command:
               - "bash"
               - "-c"
-              - echo "${OCS_NETWORK_INTERFACES}" > /tmp/ocs_network_interfaces; echo "${OCS_DEVICES}" > /tmp/ocs_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
+              - echo "${SDS_NETWORK_INTERFACES}" > /tmp/ocs_network_interfaces; echo "${SDS_DEVICES}" > /tmp/ocs_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
 EOF
 )
 job_name=$(echo ${job_name} | awk '{print $1}')
@@ -160,14 +169,12 @@ function stats_collect()
   local local_array=("$@")
   for node_name in ${local_array[@]}
   do
-    echo "Starting to collect stats on ${node_type} node ${node_name}..."
-    echo run_stats "${node_type}" "${local_array[@]}"
+    echo "$(mydate) Starting to collect stats on ${node_type} node ${node_name}..."
     run_stats "${node_type}" "${local_array[@]}"
     jobs_pods[${job_name}]=${stats_pod_name}
   done
 }
 
-# TODO: move calculate_rbd_utilization into the stats container
 function calculate_rbd_utilization()
 {
   local file_name=${1}
@@ -193,22 +200,14 @@ function calculate_rbd_utilization()
 }
 
 if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
+  oc adm policy add-scc-to-user hostnetwork -n${PROJECT_NAME} -z default
   stats_collect worker ${worker_node_array[@]}
-  [[ ${#ocs_node_array[@]} -ne 0 ]] && stats_collect ocs ${ocs_node_array[@]}
+  [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect ocs ${sds_node_array[@]}
 fi
-
-#if [[ "${JOB_TYPE}" == "init" ]]; then
-#  for node in ${worker_node_array[@]}
-#  do
-#   echo cordon_control cordon ${node}
-#  done
-#fi
-
 
 for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
-  #cordon_control uncordon ${worker_node_array[${node_number}]}
   node_name=${worker_node_array[${node_number}]}
   deployment_name=${DB_POD_PREFIX}-${j}
   if [[ "${DB_TYPE}" == "pgsql" ]]; then
@@ -216,43 +215,46 @@ do
   else
     database_ip=$(${KUBE_CMD} get pod -l app=${deployment_name} -o jsonpath='{.items[].status.podIP}')
   fi
-  echo "Starting ${BENCHMARK_PROGRAM} job for ${JOB_TYPE} in deployment ${deployment_name} with database ip ${database_ip} ..."
+  echo "$(mydate) Starting ${BENCHMARK_TOOL} job for ${JOB_TYPE} in deployment ${deployment_name} with database ip ${database_ip} ..."
   #sleep 5
   run_db_workload ${database_ip}
   jobs_pods[${job_name}]=${workload_pod_name}
-  echo "$(date) - job ${job_name} is using ${BENCHMARK_PROGRAM} pod ${workload_pod_name}"
-  #cordon_control cordon ${worker_node_array[${node_number}]}
+  echo "$(mydate) ${job_name} is using ${BENCHMARK_TOOL} pod ${workload_pod_name} on node ${node_name}"
 done
 
-#echo "uncordoning all nodes..."
-#for node in ${worker_node_array[@]}
-#do
-# echo "node=${node}"
-# cordon_control uncordon ${node}
-#done
-
 if [[ "${JOB_TYPE}" == "run" ]];then
+  if [[ -z ${RUN_NAME} ]]; then
+    RUN_NAME="${BENCHAMRK_TOOL}-${JOB_TYPE}-$(date +%s)"
+  fi
   if [[ ! -d "${RUN_NAME}" ]]; then
     mkdir -p "$RUN_NAME"
   fi
+
+  cp ${CONFIG_FILE} ${RUN_NAME}/
   job_list=""
+
   for i in "${!jobs_pods[@]}"
   do
     job_list="${job_list} ${i}"
   done
-  echo "job_list=${job_list}"
-  echo "Waiting for jobs to complete ..."
+  echo "$(mydate) Waiting for jobs to complete ..."
   ${KUBE_CMD} wait --for=condition=complete ${job_list} --timeout=4000s
-  echo "$(date) - Getting logs from all jobs ..."
+
+  echo "$(mydate) All jobs are done, getting logs ..."
+
   for i in "${!jobs_pods[@]}"
   do
     ${KUBE_CMD} logs ${jobs_pods[$i]} > ${RUN_NAME}/${jobs_pods[$i]}.log
   done
-  for node_ip in ${!worker_psql_rbd[@]}
-  do
-    file_name=$(ls ${RUN_NAME}/stats-${RUN_NAME}-worker-${node_ip}*.log)
-    rbd_device="${worker_psql_rbd[${node_ip}]}"
-    calculate_rbd_utilization ${file_name} "${rbd_device}"
-  done
+
+  if [[ "${RBD_STATS}" == "true" ]]; then
+    echo "$(mydate) Getting list of database RBDs from worker nodes and pods ..."
+    get_rbd_list
+    for node_ip in ${!worker_rbd[@]}
+    do
+      file_name=$(ls ${RUN_NAME}/stats-${RUN_NAME}-worker-${node_ip}*.log)
+      rbd_device="${worker_rbd[${node_ip}]}"
+      calculate_rbd_utilization ${file_name} "${rbd_device}"
+    done
+  fi
 fi
-${KUBE_CMD} get jobs

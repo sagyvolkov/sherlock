@@ -15,13 +15,9 @@ fi
 pushd ${RUN_NAME}
 for ((i=1; i<=${LOOPS}; i++))
 do
-  ${BASE_DIR}/run_database_workload-parallel sysbench run run${i}
+  ${BASE_DIR}/run_database_workload-parallel -b sysbench -j run -c /home/sagy/sherlock/PostgreSQL/sherlock.config -n run${i}
   sleep 60
   oc delete jobs --all
 done
-#for ((i=1; i<=${LOOPS}; i++))
-#do
-  #echo "run${i},$(${BASE_DIR}/print_sysbench_results run${i} true)"
-#  echo ""
-#done
-#popd
+popd
+${BASE_DIR}/print_sysbench_results ${RUN_NAME} csv

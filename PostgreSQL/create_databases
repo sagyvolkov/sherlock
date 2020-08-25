@@ -1,40 +1,30 @@
 #!/bin/bash
 
-readonly KUBE_CMD=oc
-readonly PVC_SIZE=500Gi
-readonly WORKERS_LIST_FILE=~/workers
-readonly OCS_LIST_FILE=~/ocs_nodes
-readonly DB_POD_PREFIX=postgresql
-readonly DB_PVC_PREFIX=postgresql-pvc
-readonly NUMBER_OF_WORKERS=2
-readonly DB_PER_WORKER=9
-readonly DB_POD_MEM=16Gi
-readonly DB_POD_CPU=4
-readonly DB_NAME=redhat
-readonly DB_USERNAME=redhat
-readonly DB_PASSWORD=redhat
-readonly STORAGE_CLASS=ocs-storagecluster-ceph-rbd
-#readonly STORAGE_CLASS=rook-ceph-block
-readonly PROJECT_NAME=postgresql
+source ./sherlock.config
 
 if [ "$(uname -s)" == "Linux" ];then
-  if [[ "${WORKERS_LIST_FILE}" == "${OCS_LIST_FILE}" ]]; then
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
     mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
   else
     mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
-    mapfile -t ocs_node_array < <(cat ${OCS_LIST_FILE})
+    mapfile -t sds_node_array < <(cat ${SDS_LIST_FILE})
   fi
 else
-  if [[ "${WORKERS_LIST_FILE}" == "${OCS_LIST_FILE}" ]]; then
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
     declare -a worker_node_array
     while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
   else
     declare -a worker_node_array
     while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
-    declare -a ocs_node_array
-    while IFS= read -r line; do ocs_node_array+=("$line"); done < <(cat ${OCS_LIST_FILE})
+    declare -a sds_node_array
+    while IFS= read -r line; do sds_node_array+=("$line"); done < <(cat ${SDS_LIST_FILE})
   fi
 fi
+
+function mydate()
+{
+ date +%Y%m%d:%H:%M:%S:
+}
 
 function create_postgresql_service()
 {
@@ -131,15 +121,123 @@ spec:
 EOF
 }
 
+function create_mysql_config_map()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-custom-config
+  namespace: ${PROJECT_NAME}
+data:
+  mysql.ocs.cnf: |
+    [mysqld]
+    skip-host-cache
+    skip-name-resolve
+    innodb_buffer_pool_size = 1G
+    default_authentication_plugin = mysql_native_password
+    [mysqldump]
+    quick
+    quote-names
+    max_allowed_packet  = 16M
+EOF
+}
+
+function create_mysql()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${pod_name}
+  template:
+    metadata:
+      labels:
+        app: ${pod_name}
+    spec:
+      containers:
+      - name: ${pod_name}
+        image: mysql:8.0
+        imagePullPolicy: "Always"
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: mysqldb
+        - mountPath: /etc/mysql/conf.d
+          name: mysql-custom-config
+        env:
+          - name: MYSQL_ROOT_PASSWORD
+            value: ${DB_PASSWORD}
+          - name: MYSQL_DATABASE
+            value: ${DB_NAME}
+          - name: MYSQL_USER
+            value: ${DB_USERNAME}
+          - name: MYSQL_PASSWORD
+            value: ${DB_PASSWORD}
+        resources:
+          requests:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+          limits:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+      volumes:
+      - name: mysqldb
+        persistentVolumeClaim:
+          claimName: ${pvc_name}
+      - name: mysql-custom-config
+        configMap:
+          name: mysql-custom-config
+EOF
+}
+
+if ! oc get projects|grep -w ${PROJECT_NAME} > /dev/null; then 
+  if [[ "${KUBE_CMD}" == "oc" ]]; then
+    ${KUBE_CMD} new-project ${PROJECT_NAME}
+  else
+    ${KUBE_CMD} create new namespace ${PROJECT_NAME}
+  fi
+fi
+
+if [[ "${DB_TYPE}" == "mysql" ]]; then
+  if [[ ! $(oc get configmap --no-headers -o custom-columns=:metadata.name) == "mysql-custom-config" ]]; then
+    echo "$(mydate) Creating MySQL configfile ..."
+    create_mysql_config_map
+  fi
+  echo "$(mydate) Making sure group scc is set for MySQL pods ..."
+  oc adm policy add-scc-to-group anyuid system:authenticated -n${PROJECT_NAME}
+fi
+
 for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
   node_name=${worker_node_array[${node_number}]}
   pvc_name=${DB_PVC_PREFIX}-${j}
   pod_name=${DB_POD_PREFIX}-${j}
-  echo "creating PostgreSQL pod ${pod_name} on node ${node_name}"
+  echo "$(mydate) Creating ${DB_TYPE} database pod ${pod_name} on node ${node_name}"
   create_pvc
-  create_postgresql
-  create_postgresql_service
-  ${KUBE_CMD} wait --for=condition=Ready $(${KUBE_CMD} get pod -l app=${pod_name} -o name)
+  case "${DB_TYPE}" in
+    pgsql) 
+      create_postgresql
+      create_postgresql_service
+      ;;
+    mysql)
+      create_mysql
+      ;;
+    *)
+      echo "Unknown database type..."
+  esac
+  ${KUBE_CMD} wait --for=condition=Ready $(${KUBE_CMD} get pod -l app=${pod_name} -o name) --timeout=120s
 done

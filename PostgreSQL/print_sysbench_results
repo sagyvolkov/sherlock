@@ -1,12 +1,12 @@
 #!/bin/bash
 
 if [[ $# -eq 0 || $# -ne 2 ]]; then
- echo "Usage : $0 <logs directory> <true for CSV format, false for nice print>"
+ echo "Usage : $0 <logs directory> <true for OUTPUT_TYPE format, false for nice print>"
  exit 1
 fi
 
 readonly LOG_DIR=${1}
-readonly CSV=${2}
+readonly OUTPUT_TYPE=${2}
 
 function print_results_per_single_run()
 {
@@ -25,16 +25,32 @@ function print_results_per_single_run()
     total_latency_95=$(echo "${total_latency_95}" + "${latency_95}"|bc)
     (( number_of_logs_file++ ))
   done < <(grep 'transactions\|avg:\|percentile:' ${run_dir}/*.log|grep -v CLEANUP|paste -d "@" - - -)
-  if ${CSV}; then
-    echo "$(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)"
-  else
-    echo "Average TPS for all databases: $(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc)"
-    echo "Average latency for all databases: $(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc)"
-    echo "Average 95% latency for all databases: $(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)"
-  fi
+  case "${OUTPUT_TYPE}" in
+    csv)
+      echo "${run_dir},$(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)"
+      ;;
+    table)
+      echo "${run_dir},$(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+      ;;
+    simple)
+      echo "Run name: ${run_dir}"
+      echo "Average TPS for all databases: $(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc)"
+      echo "Average latency for all databases: $(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc)"
+      echo "Average 95% latency for all databases: $(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)"
+      ;;
+    *)
+      echo "Unknown output type"
+      exit 1
+      ;;
+    esac
 }
 
 pushd ${LOG_DIR}
+if [[ "${OUTPUT_TYPE}" == "table" ]]; then
+  echo "Run number,Average TPS of,Average latency,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+  echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+  echo "----------------------------------------------------------------"
+fi
 for run_dir in $(ls -d run*)
 do
   print_results_per_single_run ${run_dir}
