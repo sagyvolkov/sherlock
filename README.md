@@ -1,14 +1,49 @@
-# sherlock
+# Sherlock - the old skool detective for database performance on OCP
 
-Like the great detective, the idea behind the set of scripts in this repo is to investigate performance of Software Define Storage (SDS) using generic database workloads.
+Like the great detective, the idea behind the set of scripts in this repo is to investigate performance of Software Define Storage (SDS) in the Openshift/Kuberentes domain using generic database workloads.
+Old skool is the moto here, hence why it was written in bash (run anywhere), using old "fashioned" performance measurment tools (iostat, mpstat, vmstat and so on) and without any web interface and cool graphics. Pretty much Commodore Amiga style :)
 
-The scripts are meant to be used with OpenShift/Kubernetes.
+The scripts will help you setup the database on your OCP/k8s cluster, making sure the databases are spread equally across your worker nodes, populate data and then run the tests.
 
-The script are using containers that are design specifically to run database benchmarks and collect statistics from the cluster nodes.
+It is optional, but you can choose to collect statistics from the nodes running the databases and the nodes running the SDS (can be the same nodes) so you can look at what happened at the OS level when the workload ran.
 
-The idea behind this project is to help people not only run the tests, but also make it easy to create the environment (the databases) to run the tests, because of that, the project is not asking for any kind of stateful application (like a DB) to store the data, but instead is using wherever you are running the scripts from as where the tests data will be stored.
+This project was created to measure database peformance using  Openshift Container Storage (OCS), which is Ceph based, but can easily run using any other SDS provider for OCP/k8s (in fact it was tested using other SDS and cloud storage providers - the only hardcoded notion for OCS/Ceph is the optional function to measure RBD based PVCs performance).
 
-The KISS mentality was the reason for bash. it just exists pretty much on any OS these days.
+## Requirements
+Bash > 4.0 (for macOS, just "brew install bash", then either use "/usr/local/bin/bash" in the scripts or update /etc/shells).
+
+### Deployments
+
+Nothing to actually deploy. just grab the script from the repo.
+
+### Database creation
+```bash
+create_databases
+```
+all the settings are in the sherlock.config file.
+
+### Preparing data
+#### Sysbench:
+```bash
+run_database_workload-parallel -b sysbench -j prepare -c <path to config>
+```
+#### Pgbench
+```bash
+run_database_workload-parallel -b pgbench -j prepare -c <path to config>
+```
+
+### Running a workload
+#### Sysbench:
+```bash
+run_database_workload-parallel -b sysbench -j run -c <path to config> -n <some name for the run>
+```
+#### Pgbench
+```bash
+run_database_workload-parallel -b pgbench -j run -c <path to config> -n <some name for the run>
+```
+
+
+The script are using containers that are design specifically to run database benchmarks.
 
 ## Workloads status
 
@@ -19,10 +54,3 @@ pgbench: works on PostgreSQL (TCP-B mostly writes by default)
 YCSB: works on MongoDB
 
 hammerdb: works on SQL Server (In Development)
-
-## Important points:
-1. obviously you need the kubectl or oc clients locally to run this
-2. when you are actually running a workload (like in the "run" part of sysbench or pgbench, or when using fio), the script will use the kubectl "wait" function to monitor when all jobs are done and retrieve all logs. even if you loose connecetivty or get logged out from the OCP/k8s cluster, the jobs data still reside as long as the jobs are not deleted, so you can retreive the data later on. Just make sure to remember the RUN_NAME of your run and use the "get_run_name_logs" script.
-3. if you are using the stats option, you will need to add hostnetwork and privileged SCC to whatever user and namespace running the pods:
-oc adm policy add-scc-to-user hostnetwork -npostgresql -z default
-oc adm policy add-scc-to-user privileged -npostgresql -z default
