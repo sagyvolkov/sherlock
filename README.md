@@ -60,7 +60,7 @@ The Flexible I/O (fio) tester is a well known artificial workload generator with
 While I prefer to test with real-life workloads, fio is a very fast tool to measure performance of SDS, so I've created a very small pod that just runs fio and it can help with SDS assessment.
 The run_fio_job script is pretty self explanatory. The run_fio_tests script is a sample script when you want to run multiple options in a serial fashion and then examine the results.
 
-### the sherlock.config file
+### The sherlock.config file
 Most variables are self explanatory, however, if you are not aware of sysbench of pgbench, it might get confusing:
 
 OUTPUT_INTERVAL - how often the workload will output data, it will impact the size of the logs and even the performance (for example, if you run output every second while heavily stress the cluster).
@@ -95,6 +95,10 @@ SDS_NETWORK_INTERFACES - list of the sds network interface/s (separated by space
 
 RBD_STATS - for Ceph based SDSs (OCS or Rook/Ceph), you can show IO stats per each rbd devices/volume per database, this is the actual PVC that each database is using.
 
+## Security note:
+You'll notice in the _create_database_ and _run_database_workload-parallel_ scripts a few scc modifications. 
+Security was/is never my concern when writing these scripts, but feel free to change or suggest changes to the scripts to make them more secure.
+
 ## Workloads status
 
 Sysbench: works on MySQL and PostgreSQL.
@@ -104,3 +108,9 @@ Pgbench: works on PostgreSQL (TCP-B mostly writes by default)
 YCSB: works on MongoDB (In Development)
 
 Hammerdb: works on SQL Server (In Development)
+
+### ToDo:
+1. Move to Python or at least have a version in python.
+2. Operatorize the scripts.
+
+
