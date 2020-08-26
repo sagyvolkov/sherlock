@@ -10,7 +10,9 @@ It is optional, but you can choose to collect statistics from the nodes running 
 This project was created to measure database performance using  Openshift Container Storage (OCS), which is Ceph based, but can easily run using any other SDS provider for OCP/k8s (in fact it was tested using other SDS and cloud storage providers - the only hardcoded notion for OCS/Ceph is the optional function to measure RBD based PVCs performance).
 
 ## Requirements
-Bash > 4.0 (for macOS, just "brew install bash", then either use "/usr/local/bin/bash" in the scripts or update /etc/shells).
+
+The only real requirement is bash > 4.0 
+(for macOS, just "brew install bash", then either use "/usr/local/bin/bash" in the scripts or update /etc/shells). 
 
 ### Deployments
 
@@ -59,7 +61,8 @@ While I prefer to test with real-life workloads, fio is a very fast tool to meas
 The run_fio_job script is pretty self explanatory. The run_fio_tests script is a sample script when you want to run multiple options in a serial fashion and then examine the results.
 
 ### the sherlock.config file
-most variables are self explanatory, however, if you are not aware of sysbench of pgbench, it might get confusing.
+Most variables are self explanatory, however, if you are not aware of sysbench of pgbench, it might get confusing:
+
 OUTPUT_INTERVAL - how often the workload will output data, it will impact the size of the logs and even the performance (for example, if you run output every second while heavily stress the cluster).
 
 SYSBENCH_NUMBER_OF_TABLES & SYSBENCH_ROWS_IN_TABLE - numbers of tables in the sysbench schema and number of rows to create in each table, basically impact the size of the database. (for example, 400 tables with 1,000,000 rows in each table is roughly 100GB of database size).
