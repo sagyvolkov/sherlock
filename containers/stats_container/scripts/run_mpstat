@@ -1,0 +1,6 @@
+#!/bin/bash
+
+readonly INTERVAL=${1}
+readonly COUNT=${2}
+
+mpstat -P ALL ${INTERVAL} ${COUNT}

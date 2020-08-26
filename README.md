@@ -94,7 +94,10 @@ RBD_STATS - for Ceph based SDSs (OCS or Rook/Ceph), you can show IO stats per ea
 
 ## Workloads status
 
-sysbench: works on MySQL and PostgreSQL.
-pgbench: works on PostgreSQL (TCP-B mostly writes by default)
+Sysbench: works on MySQL and PostgreSQL.
+
+Pgbench: works on PostgreSQL (TCP-B mostly writes by default)
+
 YCSB: works on MongoDB (In Development)
-hammerdb: works on SQL Server (In Development)
+
+Hammerdb: works on SQL Server (In Development)

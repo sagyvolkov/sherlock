@@ -1,0 +1,95 @@
+#!/bin/bash
+
+readonly SYSBENCH_ACTION=${1}
+readonly MAXTIME=${2}
+readonly THREADS=${3}
+readonly READ_ONLY=${4}
+readonly WRITE_ONLY=${5}
+readonly SERVICE_NAME=${6}
+readonly OUTPUT_INTERVAL=${7}
+readonly ROWS_IN_TABLE=${8}
+readonly NUMBER_OF_TABLES=${9}
+readonly DB_TYPE=${10}
+readonly DB_USERNAME=${11}
+readonly DB_PASSWORD=${12}
+readonly DB_NAME=${13}
+readonly NUMBER_OF_INSERTS=${14}
+readonly NUMBER_OF_UPDATES=${15}
+readonly NUMBER_OF_NON_INDEX_UPDATES=${16}
+
+function run_sysbench()
+{
+  if [ "${DB_TYPE}" == "mysql" ]; then
+    sysbench /usr/share/sysbench/oltp_read_write.lua \
+    --db-driver=mysql \
+    --mysql-user=${DB_USERNAME} \
+    --mysql-password=${DB_PASSWORD} \
+    --mysql-ignore-errors=all \
+    --mysql-host=${SERVICE_NAME} \
+    --mysql-db=${DB_NAME} \
+    --report-interval=${OUTPUT_INTERVAL} \
+    --table-size=${ROWS_IN_TABLE}\
+    --tables=${NUMBER_OF_TABLES} \
+    --threads=${THREADS} \
+    --time=${MAXTIME} \
+    --rand-type=uniform \
+    ${SYSBENCH_ACTION}
+  elif [ "${DB_TYPE}" == "pgsql" ]; then
+    sysbench /usr/share/sysbench/oltp_read_write.lua \
+    --db-driver=pgsql \
+    --pgsql-user=${DB_USERNAME} \
+    --pgsql-password=${DB_PASSWORD} \
+    --pgsql-host=${SERVICE_NAME} \
+    --pgsql-db=${DB_NAME} \
+    --report-interval=${OUTPUT_INTERVAL} \
+    --table-size=${ROWS_IN_TABLE}\
+    --tables=${NUMBER_OF_TABLES} \
+    --threads=${THREADS} \
+    --max-requests=0 \
+    --time=${MAXTIME} \
+    --rand-type=uniform \
+    --delete_inserts=${NUMBER_OF_INSERTS} \
+    --index_updates=${NUMBER_OF_UPDATES} \
+    --non_index_updates=${NUMBER_OF_NON_INDEX_UPDATES} \
+    ${SYSBENCH_ACTION}  
+  else
+    sysbench --db-driver=pgsql \
+    --pgsql-user=${DB_USERNAME} \
+    --pgsql-password=${DB_PASSWORD} \
+    --pgsql-ignore-errors=all \
+    --pgsql-host=${SERVICE_NAME} \
+    --pgsql-db=${DB_NAME} \
+    --report-interval=${OUTPUT_INTERVAL} \
+    --oltp-read-only=${READ_ONLY} \
+    --oltp-write-only=${WRITE_ONLY} \
+    --oltp-table-size=${ROWS_IN_TABLE}\
+    --oltp-tables-count=${NUMBER_OF_TABLES} \
+    --threads=${THREADS} \
+    --max-requests=0 \
+    --time=${MAXTIME} \
+    --rand-type=uniform \
+    --test=/usr/share/sysbench/tests/include/oltp_legacy/oltp.lua ${SYSBENCH_ACTION}
+  fi
+}
+
+if [ $# -eq 0 ]; then
+ echo "Usage : $0 <prepare|cleanup|run>"
+ exit 1
+fi
+
+case "$SYSBENCH_ACTION" in
+prepare) echo "prepping sysbench..."
+	  time run_sysbench prepare
+          echo "END-PREPARE-SYSBENCH"
+	  ;;
+cleanup) echo "cleaning sysbench..."
+	  time run_sysbench cleanup
+          echo "END_CLEANUP-SYSBENCH"
+	  ;;
+run) echo "running sysbench..."
+	  time run_sysbench run
+          echo "END-RUN-SYSBENCH"
+	  ;;
+*) echo "You must use either prepare or cleanup or run"
+   ;;
+esac

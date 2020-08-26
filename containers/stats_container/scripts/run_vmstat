@@ -1,0 +1,6 @@
+#!/bin/bash
+
+readonly INTERVAL=${1}
+readonly COUNT=${2}
+
+vmstat -t -S M ${INTERVAL} ${COUNT}
