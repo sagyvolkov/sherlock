@@ -1,0 +1,9 @@
+#!/bin/bash
+
+readonly TAG=${1}
+
+for block in 4k 8k 64k 128k 1m
+do
+  bash run_fio_job ocs 30 ${block} /data 300 1 64 10g FS 1 randrw 1 4Gi ${TAG}
+  sleep 60
+done

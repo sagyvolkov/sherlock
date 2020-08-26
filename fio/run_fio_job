@@ -1,0 +1,130 @@
+#!/bin/bash
+
+readonly KUBE_CMD=oc
+readonly SDS_TYPE=${1}
+readonly RWMIXWRITE=${2}
+readonly BLOCK_SIZE=${3}
+readonly FILE_NAME=${4}
+readonly RUNTIME=${5}
+readonly JOBS=${6}
+readonly IODEPTH=${7}
+readonly WORKSIZE=${8}
+readonly DEVICE_TYPE=${9}
+readonly DIRECT_IO=${10} # use direct=1 to do async without caches.
+readonly IO_PATTERN=${11} #readwrite for sequencial read/write, randrw for random read/write
+readonly FIO_POD_CPU=${12}
+readonly FIO_POD_MEM=${13}
+readonly TAG=${14}
+readonly RUN_NAME="${RWMIXWRITE}rw-${BLOCK_SIZE}-rt${RUNTIME}-j${JOBS}-qd${IODEPTH}-${WORKSIZE}"
+readonly FIO_PER_WORKER=1
+readonly PVC_SIZE=20Gi
+readonly WORKERS_LIST_FILE=~/workers1
+readonly STORAGE_CLASS=ocs-storagecluster-ceph-rbd
+readonly NUMBER_OF_WORKERS=3
+
+declare -A jobs_pods
+if [ "$(uname -s)" == "Linux" ];then
+  mapfile -t worker_node_array < ${WORKERS_LIST_FILE}
+else
+  while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+fi
+
+function mydate()
+{
+ date +%Y%m%d:%H:%M:%S:
+}
+
+function create_pvc()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+spec:
+  storageClassName: ${STORAGE_CLASS}
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${PVC_SIZE}
+EOF
+}
+
+function run_fio_job()
+{
+  job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: ${fio_name}-${node_name}-
+spec:
+  template:
+    spec:
+      hostNetwork: false
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+        - image: quay.io/sagyvolkov/fio_container:0.4
+          name: ${fio_name}
+          volumeMounts:
+            - name: ${SDS_TYPE}-pvc
+              mountPath: ${FILE_NAME}
+          resources:
+            limits:
+              memory: ${FIO_POD_MEM}
+              cpu: ${FIO_POD_CPU}
+          command:
+              - "bash"
+              - "-c"
+              - ./run_fio ${RWMIXWRITE} ${BLOCK_SIZE} ${FILE_NAME} ${RUNTIME} ${JOBS} ${IODEPTH} ${WORKSIZE} ${DEVICE_TYPE} ${DIRECT_IO} ${IO_PATTERN}
+      volumes:
+        - name: ${SDS_TYPE}-pvc
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+            readOnly: false
+EOF
+)
+job_name=$(echo ${job_name} | awk '{print $1}')
+fio_pod_name=$(${KUBE_CMD} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+}
+
+function run_fio_job_parallel()
+{
+  for ((j=1; j<=${FIO_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+  do
+    fio_name=fio-${SDS_TYPE}-${RUN_NAME}
+    node_number=$((j%NUMBER_OF_WORKERS))
+    pvc_name=${SDS_TYPE}-pvc-${j}
+    oc get pvc ${pvc_name} > /dev/null 2>&1
+    if [[ "${?}" == "1" ]];then
+      create_pvc
+    fi
+    node_name=${worker_node_array[${node_number}]}
+    fio_pod_name=${SDS_TYPE}-${RUN_NAME}-${j}
+    echo "$(mydate) Starting fio job ${job_name} for node ${node_name}"
+    run_fio_job
+    jobs_pods[${job_name}]=${fio_pod_name}
+    echo "$(mydate) ${job_name} is using fio pod ${fio_pod_name}"
+  done
+
+  job_list=""
+  for i in "${!jobs_pods[@]}"
+  do
+    job_list="${job_list} ${i}"
+  done
+  echo "$(mydate) Waiting for jobs to complete ..."
+  ${KUBE_CMD} wait --for=condition=complete ${job_list} --timeout=4000s
+  echo "$(mydate) Getting logs from all jobs ..."
+  for i in "${!jobs_pods[@]}"
+  do
+    fio_output=${jobs_pods[$i]}-${TAG}.log
+    ${KUBE_CMD} logs ${jobs_pods[$i]} > ${fio_output}
+    echo "$(mydate) ${i}"
+    cat ${fio_output} | grep 'IOPS\|READ\|WRITE'
+    echo ""
+  done
+}
+
+run_fio_job_parallel
