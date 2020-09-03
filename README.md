@@ -1,5 +1,16 @@
 # Sherlock - the old skool detective for database performance on OCP
 
+<pre>
+   ,_       
+ ,'  `\,_   
+ |_,-'_)    
+ /##c '\  ( 
+' |'  -{.  )
+  /\__-' \[]
+ /`-_`\     
+ '     \    
+</pre>
+
 Like the great detective, the idea behind the set of scripts in this repo is to investigate performance of Software Define Storage (SDS) in the Openshift/Kuberentes domain using generic database workloads.
 Old skool is the moto here, hence why it was written in bash (run anywhere), using old "fashioned" performance measurement tools (iostat, mpstat, vmstat and so on) and without any web interface and cool graphics. Pretty much Commodore Amiga style :)
 
@@ -116,3 +127,5 @@ Hammerdb: works on SQL Server (In Development)
 4. Adding redis using YCSB
 5. Move to Python or at least have a version in python.
 6. Maybe operatorize the scripts :)
+
+\*(sherlock aschii image courtesy of hjm)
