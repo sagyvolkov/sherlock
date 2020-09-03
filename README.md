@@ -111,9 +111,8 @@ Hammerdb: works on SQL Server (In Development)
 
 ### ToDo:
 1. Adding SQLserver using hammerdb
-2. Adding MongoDB using YCSB
-3. Adding redis using YCSB
-4. Move to Python or at least have a version in python.
-5. Maybe operatorize the scripts :)
-
-
+2. Adding PCP (Performance Co-Pilot) as a stats pods vs plain sysstat data. You will be able to choose between type of stats collection, but the PCP stats are going to be a lot more comprehensive and includes also graphs.
+3. Adding MongoDB using YCSB
+4. Adding redis using YCSB
+5. Move to Python or at least have a version in python.
+6. Maybe operatorize the scripts :)
