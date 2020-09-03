@@ -110,7 +110,10 @@ YCSB: works on MongoDB (In Development)
 Hammerdb: works on SQL Server (In Development)
 
 ### ToDo:
-1. Move to Python or at least have a version in python.
-2. Operatorize the scripts.
+1. Adding SQLserver using hammerdb
+2. Adding MongoDB using YCSB
+3. Adding redis using YCSB
+4. Move to Python or at least have a version in python.
+5. Maybe operatorize the scripts :)
 
 
