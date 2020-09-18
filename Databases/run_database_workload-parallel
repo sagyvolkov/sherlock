@@ -1,21 +1,33 @@
 #!/bin/bash
 
-while getopts b:j:c:n: flag
+function display_usage()
+{
+  echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c config file via full path [-n <optional dir name to keep run logs>]"
+}
+
+while getopts b:j:c:n:h flag
 do
     case "${flag}" in
         b) readonly BENCHMARK_TOOL=${OPTARG};;
         j) readonly JOB_TYPE=${OPTARG};;
         c) readonly CONFIG_FILE=${OPTARG};;
         n) readonly RUN_NAME=${OPTARG};;
+        h) display_usage;exit;;
     esac
 done
 
 if [[ -z ${BENCHMARK_TOOL} || -z ${JOB_TYPE} ]]; then
-  echo "Usage : $0 -b (benchmark tool) <sysbench or pgbench> -j (job type) <prepare, run or cleanup(sysbench only)> -c config file via full path [-n <optional dir name to keep run logs>]"
+  display_usage
   exit 1
 fi
 
 source ${CONFIG_FILE}
+
+if [[ "${BENCHMARK_TOOL}" == "hammerdb" ]]; then
+  readonly STATS_COUNT=$(((HAMMERDB_RAMPUP+WORKLOAD_RUNTIME+10)/STATS_INTERVAL))
+else
+  readonly STATS_COUNT=$(((WORKLOAD_RUNTIME+10)/STATS_INTERVAL))
+fi
 
 declare -A jobs_pods
 declare -A worker_rbd
@@ -42,16 +54,16 @@ fi
 
 function mydate()
 {
- date +%Y%m%d:%H:%M:%S:
+  date +%Y%m%d:%H:%M:%S:
 }
 
 function get_rbd_list()
 {
   declare -A pvc_array
-  for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+  for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
   do
     deployment_name=${DB_POD_PREFIX}-${j}
-    claim_name=$(oc get deployment ${deployment_name} -o yaml |grep claimName|awk '{print $2}')
+    claim_name=$(oc get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.volumes[].persistentVolumeClaim.claimName}')
     volume_name=$(oc get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
     pvc_array[${j}]=${volume_name}
   done
@@ -75,21 +87,39 @@ function get_rbd_list()
   done
 }
 
-function run_db_workload()
+function prepare_run_command()
 {
-  local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
-  local db_ip="${1}"
-  local node_type="${2}"
   if [[ "${BENCHMARK_TOOL}" == "sysbench" ]]; then
     run_command="./run_sysbench ${JOB_TYPE} ${WORKLOAD_RUNTIME} ${THREADS} ${SYSBENCH_READ_ONLY} ${SYSBENCH_WRITE_ONLY} ${db_ip} ${OUTPUT_INTERVAL} ${SYSBENCH_ROWS_IN_TABLE} ${SYSBENCH_NUMBER_OF_TABLES} ${DB_TYPE} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${SYSBENCH_NUMBER_OF_INSERTS} ${SYSBENCH_NUMBER_OF_UPDATES} ${SYSBENCH_NUMBER_OF_NON_INDEX_UPDATES}"
-  else
+  fi
+  if [[ "${BENCHMARK_TOOL}" == "pgbench" ]]; then
     if [[ "${JOB_TYPE}" == "prepare" ]]; then
       run_command="./run_pgbench ${JOB_TYPE} ${db_ip} ${CLIENTS} ${THREADS} ${PGBENCH_RUN_TYPE} ${PGBENCH_RUN_TYPE_VAR} ${PGBENCH_VACUUM} ${PGBENCH_QUIET} ${PGBENCH_SCALE} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${OUTPUT_INTERVAL} ${PGBENCH_READ_ONLY}"
     else
       run_command="./run_pgbench ${PGBENCH_WORKLOAD_TYPE} ${db_ip} ${CLIENTS} ${THREADS} ${PGBENCH_RUN_TYPE} ${PGBENCH_RUN_TYPE_VAR} ${PGBENCH_VACUUM} ${PGBENCH_QUIET} ${PGBENCH_SCALE} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${OUTPUT_INTERVAL} ${PGBENCH_READ_ONLY}"
     fi
   fi
+  if [[ "${BENCHMARK_TOOL}" == "hammerdb" ]]; then
+    case "${JOB_TYPE}" in
+      prepare)
+        run_command="./run_hammerdb mssqls prepare ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_BUILD_VU}"
+        ;;
+      run)
+        run_command="./run_hammerdb mssqls run ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_RUN_VU} ${OUTPUT_INTERVAL} $((HAMMERDB_RAMPUP/60)) $((WORKLOAD_RUNTIME/60))"
+        ;;
+      cleanup)
+        run_command="./run_hammerdb mssqls cleanup ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_RUN_VU}"
+        ;;
+    esac
+  fi
   if ${DEBUG}; then echo "$(mydate)-run_command=${run_command}";fi
+}
+
+function start_the_workload_job()
+{
+  local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  local db_ip="${1}"
+  prepare_run_command
   job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
 apiVersion: batch/v1
 kind: Job
@@ -102,7 +132,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/benchmark-container:0.87
+        - image: quay.io/sagyvolkov/benchmark-container:0.95
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
             limits:
@@ -205,19 +235,18 @@ if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
   [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect ocs ${sds_node_array[@]}
 fi
 
-for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
   node_name=${worker_node_array[${node_number}]}
   deployment_name=${DB_POD_PREFIX}-${j}
-  if [[ "${DB_TYPE}" == "pgsql" ]]; then
+  if [[ "${DB_TYPE}" == "pgsql" || "${DB_TYPE}" == "sqlserver" ]]; then
     database_ip=$(${KUBE_CMD} get svc -n ${PROJECT_NAME} ${deployment_name} -o jsonpath='{.spec.clusterIP}')
   else
     database_ip=$(${KUBE_CMD} get pod -l app=${deployment_name} -o jsonpath='{.items[].status.podIP}')
   fi
   echo "$(mydate) Starting ${BENCHMARK_TOOL} job for ${JOB_TYPE} in deployment ${deployment_name} with database ip ${database_ip} ..."
-  #sleep 5
-  run_db_workload ${database_ip}
+  start_the_workload_job ${database_ip}
   jobs_pods[${job_name}]=${workload_pod_name}
   echo "$(mydate) ${job_name} is using ${BENCHMARK_TOOL} pod ${workload_pod_name} on node ${node_name}"
 done
@@ -247,7 +276,7 @@ if [[ "${JOB_TYPE}" == "run" ]];then
     ${KUBE_CMD} logs ${jobs_pods[$i]} > ${RUN_NAME}/${jobs_pods[$i]}.log
   done
 
-  if [[ "${RBD_STATS}" == "true" ]]; then
+  if [[ "${STATS}" == "true" && "${RBD_STATS}" == "true" ]]; then
     echo "$(mydate) Getting list of database RBDs from worker nodes and pods ..."
     get_rbd_list
     for node_ip in ${!worker_rbd[@]}
