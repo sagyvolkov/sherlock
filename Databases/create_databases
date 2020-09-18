@@ -166,6 +166,8 @@ spec:
       labels:
         app: ${pod_name}
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
       containers:
       - name: ${pod_name}
         image: mysql:8.0
@@ -203,6 +205,91 @@ spec:
 EOF
 }
 
+function create_sqlserver_service()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${pod_name}
+  labels:
+    app: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      port: 31433
+      targetPort: 1433
+  selector:
+   app: ${pod_name}
+EOF
+}
+
+function create_sqlserver()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${pod_name}
+  template:
+    metadata:
+      labels:
+        app: ${pod_name}
+    spec:
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+      - name: ${pod_name}
+        image: mcr.microsoft.com/mssql/rhel/server:2019-latest
+        imagePullPolicy: "Always"
+        ports:
+        - containerPort: 1433
+        volumeMounts:
+        - mountPath: /var/opt/mssql
+          name: sqlserverdb
+        env:
+          - name: MSSQL_PID
+            value: "Developer"
+          - name: ACCEPT_EULA
+            value: "Y"
+          - name: MSSQL_SA_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sqlserver
+                key: SA_PASSWORD
+        resources:
+          requests:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+          limits:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+      volumes:
+      - name: sqlserverdb
+        persistentVolumeClaim:
+          claimName: ${pvc_name}
+EOF
+}
+
+function create_secret()
+{
+ oc create secret generic sqlserver --from-literal=SA_PASSWORD=${SA_PASSWORD} -n ${PROJECT_NAME}
+}
+
 if ! oc get projects|grep -w ${PROJECT_NAME} > /dev/null; then 
   if [[ "${KUBE_CMD}" == "oc" ]]; then
     ${KUBE_CMD} new-project ${PROJECT_NAME}
@@ -220,7 +307,11 @@ if [[ "${DB_TYPE}" == "mysql" ]]; then
   oc adm policy add-scc-to-group anyuid system:authenticated -n${PROJECT_NAME}
 fi
 
-for ((j=1; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
+if [[ "${DB_TYPE}" == "sqlserver" ]]; then
+  create_secret
+fi
+
+for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
   node_name=${worker_node_array[${node_number}]}
@@ -229,12 +320,16 @@ do
   echo "$(mydate) Creating ${DB_TYPE} database pod ${pod_name} on node ${node_name}"
   create_pvc
   case "${DB_TYPE}" in
-    pgsql) 
+    postgresql) 
       create_postgresql
       create_postgresql_service
       ;;
     mysql)
       create_mysql
+      ;;
+    sqlserver)
+      create_sqlserver
+      create_sqlserver_service
       ;;
     *)
       echo "Unknown database type..."

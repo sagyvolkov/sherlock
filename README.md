@@ -22,8 +22,8 @@ This project was created to measure database performance using  Openshift Contai
 
 ## Requirements
 
-The only real requirement is bash > 4.0 
-(for macOS, just "brew install bash", then either use "/usr/local/bin/bash" in the scripts or update /etc/shells). 
+The only real requirement is bash > 4.0 (associative arrays are heavily used here).
+(for macOS, just "brew install bash", then either use "#!/usr/local/bin/bash" instead of "#!/bin/bash" in the scripts or update /etc/shells). 
 
 ### Deployments
 
