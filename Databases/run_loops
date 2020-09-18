@@ -1,13 +1,15 @@
 #!/bin/bash
 
-if [[ $# -eq 0 || $# -ne 2 ]]; then
- echo "Usage : $0 <run name> <number of loops>"
+if [[ $# -eq 0 || $# -lt 3 ]]; then
+ echo "Usage : $0 <run name> <number of loops> <benchmark: sysbench or hammerdb> <full path to sherlock config file>"
  exit 1
 fi
 
 readonly BASE_DIR=$(pwd)
 readonly RUN_NAME=${1}
 readonly LOOPS=${2}
+readonly BENCHMARK_TOOL=${3}
+readonly CONFIG_FILE=${4}
 
 if [[ ! -d "${RUN_NAME}" ]]; then
   mkdir -p "${RUN_NAME}"
@@ -15,9 +17,9 @@ fi
 pushd ${RUN_NAME}
 for ((i=1; i<=${LOOPS}; i++))
 do
-  ${BASE_DIR}/run_database_workload-parallel -b sysbench -j run -c /home/sagy/sherlock/PostgreSQL/sherlock.config -n run${i}
+  ${BASE_DIR}/run_database_workload-parallel -b ${BENCHMARK_TOOL} -j run -c ${CONFIG_FILE} -n run${i}
   sleep 60
   oc delete jobs --all
 done
 popd
-${BASE_DIR}/print_sysbench_results ${RUN_NAME} csv
+${BASE_DIR}/print_results ${RUN_NAME} csv ${BENCHMARK_TOOL}
