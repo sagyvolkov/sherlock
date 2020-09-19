@@ -1,0 +1,48 @@
+#!/bin/tclsh
+
+proc convert_seconds {secs} {
+    set h [expr {$secs/3600}]
+    incr secs [expr {$h*-3600}]
+    set m [expr {$secs/60}]
+    set s [expr {$secs%60}]
+    set n [format "%02.2d:%02.2d:%02.2d" $h $m $s]
+    return "$n"
+}
+
+proc runtimer { seconds } {
+set x 0
+set timerstop 0
+while {!$timerstop} {
+incr x
+after 1000
+  if { ![ expr {$x % _OUTPUT_INTERVAL_} ] } {
+          set y [convert_seconds $x]
+          puts "Duration of run $y"
+  }
+update
+if {  [ vucomplete ] || $x eq $seconds } { set timerstop 1 }
+    }
+return
+}
+puts "Setting the run configuration..."
+dbset db mssqls
+diset connection mssqls_tcp true
+diset connection mssqls_pass _ADMIN_PASSWORD_
+diset connection mssqls_server _SERVICE_IP_
+diset connection mssqls_linux_server _SERVICE_IP_
+diset connection mssqls_port 31433
+diset connection mssqls_authentication sql
+diset tpcc mssqls_driver timed
+diset tpcc mssqls_rampup _RAMP_MINUTES_
+diset tpcc mssqls_duration _RUN_DURATION_
+vuset logtotemp 1
+print dict
+loadscript
+puts "Run starts..."
+vuset vu _NUMBER_OF_VIRTUAL_USERS_
+vucreate
+vurun
+runtimer _TIMER_IN_SECONDS_
+vudestroy
+after 5000
+puts "Run completes..."
