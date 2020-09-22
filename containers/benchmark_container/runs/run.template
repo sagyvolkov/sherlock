@@ -35,6 +35,7 @@ diset connection mssqls_authentication sql
 diset tpcc mssqls_driver timed
 diset tpcc mssqls_rampup _RAMP_MINUTES_
 diset tpcc mssqls_duration _RUN_DURATION_
+diset tpcc mssqls_raiseerror _RAISE_ERROR_
 vuset logtotemp 1
 print dict
 loadscript

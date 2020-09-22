@@ -33,6 +33,9 @@ function run_sysbench()
     --threads=${THREADS} \
     --time=${MAXTIME} \
     --rand-type=uniform \
+    --delete_inserts=${NUMBER_OF_INSERTS} \
+    --index_updates=${NUMBER_OF_UPDATES} \
+    --non_index_updates=${NUMBER_OF_NON_INDEX_UPDATES} \
     ${SYSBENCH_ACTION}
   elif [ "${DB_TYPE}" == "pgsql" ]; then
     sysbench /usr/share/sysbench/oltp_read_write.lua \

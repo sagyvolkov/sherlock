@@ -105,7 +105,7 @@ function prepare_run_command()
         run_command="./run_hammerdb mssqls prepare ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_BUILD_VU}"
         ;;
       run)
-        run_command="./run_hammerdb mssqls run ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_RUN_VU} ${OUTPUT_INTERVAL} $((HAMMERDB_RAMPUP/60)) $((WORKLOAD_RUNTIME/60))"
+        run_command="./run_hammerdb mssqls run ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_RUN_VU} ${OUTPUT_INTERVAL} $((HAMMERDB_RAMPUP/60)) $((WORKLOAD_RUNTIME/60)) ${HAMMERDB_RAISE_ERROR}"
         ;;
       cleanup)
         run_command="./run_hammerdb mssqls cleanup ${db_ip} ${SA_PASSWORD} ${HAMMERDB_WAREHOUSES} ${HAMMERDB_RUN_VU}"
@@ -132,7 +132,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/benchmark-container:0.95
+        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.2
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
             limits:

@@ -1,14 +1,15 @@
 #!/bin/bash
 
-if [[ $# -eq 0 || $# -lt 3 ]]; then
- echo "Usage : $0 <logs directory> <csv, simple or table format> <benchmark used: sysbench or hammerdb> <optional: full path to config file> "
+if [[ $# -eq 0 || $# -lt 4 ]]; then
+ echo "Usage : $0 <logs directory> <single or loop run> <csv, simple or table format> <benchmark used: sysbench or hammerdb> <optional: full path to config file> "
  exit 1
 fi
 
 readonly LOG_DIR=${1}
-readonly OUTPUT_TYPE=${2}
-readonly BENCHMARK_TOOL=${3}
-readonly CONFIG_FILE=${4}
+readonly RUN_TYPE=${2}
+readonly OUTPUT_TYPE=${3}
+readonly BENCHMARK_TOOL=${4}
+readonly CONFIG_FILE=${5}
 
 function print_sysbench_results_per_single_run()
 {
@@ -82,27 +83,45 @@ function print_hammerdb_results_per_single_run()
     esac
 }
 
-pushd ${LOG_DIR}
-if [[ "${BENCHMARK_TOOL}" == "sysbench" ]]; then
-  if [[ "${OUTPUT_TYPE}" == "table" ]]; then
-    echo "Run number,Average TPS of,Average latency,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
-    echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
-    echo "----------------------------------------------------------------"
+function print_loop()
+{
+  pushd ${LOG_DIR}
+  if [[ "${BENCHMARK_TOOL}" == "sysbench" ]]; then
+    if [[ "${OUTPUT_TYPE}" == "table" ]]; then
+      echo "Run number,Average TPS of,Average latency,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+      echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+      echo "----------------------------------------------------------------"
+    fi
+    for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
+    do
+      print_sysbench_results_per_single_run ${run_dir}
+    done
+  else
+    if [[ "${OUTPUT_TYPE}" == "table" ]]; then
+      echo "Run number,Average TPM of,Average NOPM of,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
+      echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
+      echo "----------------------------------------------"
+    fi
+    for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
+    do
+      print_hammerdb_results_per_single_run ${run_dir}
+    done
   fi
-  for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
-  do
-    print_sysbench_results_per_single_run ${run_dir}
-  done
-else
-  if [[ "${OUTPUT_TYPE}" == "table" ]]; then
-    echo "Run number,Average TPM of,Average NOPM of,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
-    echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
-    echo "----------------------------------------------"
-  fi
-  for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
-  do
-    print_hammerdb_results_per_single_run ${run_dir}
-  done
-fi
+  popd
+}
 
-popd
+case "${RUN_TYPE}" in
+  single)
+    case "${BENCHMARK_TOOL}" in
+      hammerdb)
+        print_hammerdb_results_per_single_run ${LOG_DIR}
+        ;;
+      *)
+        print_sysbench_results_per_single_run ${LOG_DIR}
+        ;;
+    esac
+    ;;
+  loop)
+    print_loop
+    ;;
+esac

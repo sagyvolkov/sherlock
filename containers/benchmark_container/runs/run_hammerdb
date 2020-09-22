@@ -9,6 +9,7 @@ readonly VIRTUAL_USERS=${6}
 readonly OUTPUT_INTERVAL=${7}
 readonly RAMPUP=${8}
 readonly RUN_DURATION=${9}
+readonly RAISE_ERROR=${10}
 
 function create_data()
 {
@@ -22,7 +23,7 @@ function run_hammerdb()
 {
   timer=$(((RAMPUP+RUN_DURATION)*60+10))
   temp_tcl=/tmp/run.tcl
-  sed "s/_TYPE_OF_DB_/${DB_TYPE}/g;s/_SERVICE_IP_/${SERVICE_IP}/g;s/_ADMIN_PASSWORD_/${ADMIN_PASSWORD}/g;s/_RAMP_MINUTES_/${RAMPUP}/g;s/_NUMBER_OF_VIRTUAL_USERS_/${VIRTUAL_USERS}/g;s/_RUN_DURATION_/${RUN_DURATION}/g;s/_TIMER_IN_SECONDS_/${timer}/g;s/_OUTPUT_INTERVAL_/${OUTPUT_INTERVAL}/g" run.template > ${temp_tcl}
+  sed "s/_TYPE_OF_DB_/${DB_TYPE}/g;s/_SERVICE_IP_/${SERVICE_IP}/g;s/_ADMIN_PASSWORD_/${ADMIN_PASSWORD}/g;s/_RAMP_MINUTES_/${RAMPUP}/g;s/_NUMBER_OF_VIRTUAL_USERS_/${VIRTUAL_USERS}/g;s/_RUN_DURATION_/${RUN_DURATION}/g;s/_TIMER_IN_SECONDS_/${timer}/g;s/_OUTPUT_INTERVAL_/${OUTPUT_INTERVAL}/g;s/_RAISE_ERROR_/${RAISE_ERROR}/g" run.template > ${temp_tcl}
   cd /hammerdb
   ./hammerdbcli auto ${temp_tcl}
 }

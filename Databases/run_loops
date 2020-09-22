@@ -22,4 +22,4 @@ do
   oc delete jobs --all
 done
 popd
-${BASE_DIR}/print_results ${RUN_NAME} csv ${BENCHMARK_TOOL}
+${BASE_DIR}/print_results ${RUN_NAME} loop csv ${BENCHMARK_TOOL}
