@@ -9,7 +9,7 @@ readonly NODE_TYPE=${3}
 function calculate_ceph_device_utilization()
 {
   local file_name=${1}
-  for device_name in $(cat /tmp/ocs_devices)
+  for device_name in $(cat /tmp/sds_devices)
   do
       let r_s=0
       let w_s=0
@@ -47,7 +47,7 @@ function calculate_cpu_utilization()
 function calculate_network_stats()
 {
   local file_name=${1}
-  for interface_name in $(cat /tmp/ocs_network_interfaces)
+  for interface_name in $(cat /tmp/sds_network_interfaces)
   do
     for net_stat_type in RX TX
     do
@@ -75,6 +75,6 @@ cat /tmp/mpstat.log | sed 's:^:MPSTAT-:'
 cat /tmp/vmstat.log | sed 's:^:VMSTAT-:'
 cat /tmp/ifconfig.log
 
-[[ "${NODE_TYPE}" == "ocs" ]] && calculate_ceph_device_utilization /tmp/iostat.log
-[[ "${NODE_TYPE}" == "ocs" ]] && calculate_network_stats /tmp/ifconfig.log
+[[ "${NODE_TYPE}" == "sds" ]] && calculate_ceph_device_utilization /tmp/iostat.log
+[[ "${NODE_TYPE}" == "sds" ]] && calculate_network_stats /tmp/ifconfig.log
 calculate_cpu_utilization /tmp/mpstat.log

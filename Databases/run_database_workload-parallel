@@ -2,7 +2,7 @@
 
 function display_usage()
 {
-  echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c config file via full path [-n <optional dir name to keep run logs>]"
+  echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c (config file) -n (run name)"
 }
 
 while getopts b:j:c:n:h flag
@@ -19,6 +19,16 @@ done
 if [[ -z ${BENCHMARK_TOOL} || -z ${JOB_TYPE} ]]; then
   display_usage
   exit 1
+fi
+
+[[ -z ${CONFIG_FILE} ]] && CONFIG_FILE=sherlock.config
+
+if [[ -z ${RUN_NAME} ]]; then
+  if [ "$(uname -s)" == "Linux" ];then
+    RUN_NAME=$(cat /dev/random | tr -dc "[:lower:]" | head -c 6)
+  else
+    RUN_NAME=$(cat /dev/random | LC_CTYPE=C tr -dc "[:lower:]" | head -c 6)
+  fi
 fi
 
 source ${CONFIG_FILE}
@@ -132,7 +142,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.2
+        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.3
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
             limits:
@@ -156,7 +166,7 @@ function run_stats()
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: stats-${RUN_NAME}-${node_type}-${node_name}-
+  generateName: stats-${node_type}-${RUN_NAME}-${node_name}-
 spec:
   template:
     spec:
@@ -165,7 +175,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/stats-container:0.94
+        - image: quay.io/sagyvolkov/stats-container:sherlock0.3
           name: stats-${RUN_NAME}
           resources:
             limits:
@@ -174,7 +184,7 @@ spec:
           command:
               - "bash"
               - "-c"
-              - echo "${SDS_NETWORK_INTERFACES}" > /tmp/ocs_network_interfaces; echo "${SDS_DEVICES}" > /tmp/ocs_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
+              - echo "${SDS_NETWORK_INTERFACES}" > /tmp/sds_network_interfaces; echo "${SDS_DEVICES}" > /tmp/sds_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
 EOF
 )
 job_name=$(echo ${job_name} | awk '{print $1}')
@@ -232,7 +242,7 @@ function calculate_rbd_utilization()
 if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
   oc adm policy add-scc-to-user hostnetwork -n${PROJECT_NAME} -z default
   stats_collect worker ${worker_node_array[@]}
-  [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect ocs ${sds_node_array[@]}
+  [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
 fi
 
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
@@ -276,7 +286,7 @@ if [[ "${JOB_TYPE}" == "run" ]];then
     ${KUBE_CMD} logs ${jobs_pods[$i]} > ${RUN_NAME}/${jobs_pods[$i]}.log
   done
 
-  if [[ "${STATS}" == "true" && "${RBD_STATS}" == "true" ]]; then
+  if [[ "${STATS}" == "true" && "${RBD_STATS}" == "true" && "${KUBE_CMD}" == "oc" ]]; then
     echo "$(mydate) Getting list of database RBDs from worker nodes and pods ..."
     get_rbd_list
     for node_ip in ${!worker_rbd[@]}
@@ -287,3 +297,4 @@ if [[ "${JOB_TYPE}" == "run" ]];then
     done
   fi
 fi
+echo "$(mydate) End of $0 script ..."
