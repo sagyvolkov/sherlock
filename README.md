@@ -11,14 +11,15 @@
  '     \    
 </pre>
 
-Like the great detective, the idea behind the set of scripts in this repo is to investigate performance of Software Define Storage (SDS) in the Openshift/Kuberentes domain using generic database workloads.
+Like the great detective, the idea behind the set of scripts in this repo is to investigate performance of Software Define Storage (SDS) in the Kuberentes/OpenShift domain using generic database workloads.
 Old skool is the moto here, hence why it was written in bash (run anywhere), using old "fashioned" performance measurement tools (iostat, mpstat, vmstat and so on) and without any web interface and cool graphics. Pretty much Commodore Amiga style :)
 
-The scripts will help you setup the database on your OCP/k8s cluster, making sure the databases are spread equally across your worker nodes, populate data and then run the tests.
+The scripts will help you setup the database on your Kuberenetes/OpenShift cluster, making sure the databases are spread equally across your worker nodes, populate data and then run the tests.
 
-It is optional, but you can choose to collect statistics from the nodes running the databases and the nodes running the SDS (can be the same nodes) so you can look at what happened at the OS level when the workload ran.
+Optionally you can choose to collect OS statistics from the nodes running the databases and the nodes running the SDS (can also be the same nodes in the k8s cluster are running both the databases and the SDS - converge mode) so you can look at what happened at the OS level when the workload ran.
 
-This project was created to measure database performance using  Openshift Container Storage (OCS), which is Ceph based, but can easily run using any other SDS provider for OCP/k8s (in fact it was tested using other SDS and cloud storage providers - the only hardcoded notion for OCS/Ceph is the optional function to measure RBD based PVCs performance).
+The project was initially tested on Rook/Ceph and Openshift Container Storage (OCS) (both are Ceph based), but was tested with Portworx storage as well and also just plain direct attach storage via the Local Storage Operator (LSO).<br/>
+Other non-SDS storage providers will work as well, all you have to do is change the storage class that project is using and the databases will be deployed and output such TPS/TPM/NOPM, latency and so on will be provided, however, the performance statistics collection should only be used for Software Define Storage (SDS) type of storage that runs on nodes part of the Kuberenetes cluster.
 
 ## Requirements
 
