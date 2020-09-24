@@ -1,6 +1,21 @@
 #!/bin/bash
 
-source ./sherlock.config
+function display_usage()
+{
+  echo "Usage : $0 (optional -c <path to config file>)"
+}
+
+while getopts c:h flag
+do
+    case "${flag}" in
+        c) readonly CONFIG_FILE=${OPTARG};;
+        h) display_usage;exit;;
+    esac
+done
+
+[[ -z ${CONFIG_FILE} ]] && CONFIG_FILE=sherlock.config
+
+source ${CONFIG_FILE}
 
 if [ "$(uname -s)" == "Linux" ];then
   if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then

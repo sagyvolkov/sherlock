@@ -256,6 +256,9 @@ stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-8fwqv-gg89r8h5tm.log:AVERAGE TX: 
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-8fwqv-gg89r8h5tm.log:AVERAGE CPU utilization: 26.62
 ```
 
+## Cleanup
+You can use the _delete_databases_ script to delete all objects created by _create_databases_
+
 ### TODO (in no particular order of importance):
 1. Adding PCP (Performance Co-Pilot) as a stats pods vs plain sysstat data. You will be able to choose between type of stats collection, but the PCP stats are going to be a lot more comprehensive and includes also graphs.
 2. List of SDS devices per node (vs per cluster)
@@ -264,5 +267,6 @@ stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-8fwqv-gg89r8h5tm.log:AVERAGE CPU 
 5. Move to Python or at least have a version in python.
 6. Maybe operatorize the scripts :)
 7. Add the ability to use "-j run" without waiting for the jobs to finish and without collecting the logs.
+8. Run create_database without wait and in parallel.
 
 \*(sherlock aschii image courtesy of hjm)

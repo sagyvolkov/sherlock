@@ -1,0 +1,39 @@
+#!/bin/bash
+
+function mydate()
+{
+ date +%Y%m%d:%H:%M:%S:
+}
+
+function display_usage()
+{
+  echo "Usage : $0 (optional -c <path to config file>)"
+}
+
+while getopts c:h flag
+do
+    case "${flag}" in
+        c) readonly CONFIG_FILE=${OPTARG};;
+        h) display_usage;exit;;
+    esac
+done
+
+[[ -z ${CONFIG_FILE} ]] && CONFIG_FILE=sherlock.config
+
+source ${CONFIG_FILE}
+
+for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
+do
+  node_number=$((j%NUMBER_OF_WORKERS))
+  node_name=${worker_node_array[${node_number}]}
+  pvc_name=${DB_PVC_PREFIX}-${j}
+  pod_name=${DB_POD_PREFIX}-${j}
+  echo "$(mydate) Deleting deployment ${pod_name}..."
+  ${KUBE_CMD} delete deployment ${pod_name}
+  echo "$(mydate) Deleting PVC ${pvc_name}..."
+  ${KUBE_CMD} delete pvc ${pvc_name}
+  if [[ "${DB_TYPE}" != "mysql" ]]; then
+    echo "$(mydate) Deleting service ${pod_name}..."
+    ${KUBE_CMD} delete service ${pod_name}
+  fi
+done
