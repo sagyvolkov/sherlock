@@ -25,7 +25,7 @@ function calculate_ceph_device_utilization()
       avg_r_s=$(echo "scale=2;$r_s/$number_of_inputs"|bc)
       avg_w_s=$(echo "scale=2;$w_s/$number_of_inputs"|bc)
       avg_util=$(echo "scale=2;$util/$number_of_inputs"|bc)
-      echo "AVERAGE EBS device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}"
+      echo "SUMMARY: average SDS device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}"
   done
 }
 
@@ -41,7 +41,7 @@ function calculate_cpu_utilization()
     let number_of_inputs++
   done < <(grep all ${file_name} |awk '{print $12}')
   avg=$(echo "scale=2;100-($total/$number_of_inputs)"|bc)
-  echo "AVERAGE CPU utilization: $avg"
+  echo "SUMMARY: CPU utilization: $avg"
 }
 
 function calculate_network_stats()
@@ -54,7 +54,7 @@ function calculate_network_stats()
       bytes_before=$(grep BEFORE ${file_name} | grep -A7 IFCONFIG.BEFORE-${interface_name} | grep "${net_stat_type} packets" | awk '{print $6}')
       bytes_after=$(grep AFTER ${file_name} | grep -A7 IFCONFIG.AFTER-${interface_name} | grep "${net_stat_type} packets" | awk '{print $6}')
       total_bytes=$(echo "scale=2;(${bytes_after}-${bytes_before})/(1024^3)"|bc -l)
-      echo "AVERAGE ${net_stat_type}: ${total_bytes}GB"
+      echo "SUMMARY: SDS Network traffic ${net_stat_type}: ${total_bytes}GB"
     done
   done
 }

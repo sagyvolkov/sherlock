@@ -5,6 +5,11 @@ function display_usage()
   echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c (config file) -n (run name)"
 }
 
+function mydate()
+{
+  date +%Y%m%d:%H:%M:%S:
+}
+
 while getopts b:j:c:n:h flag
 do
     case "${flag}" in
@@ -32,6 +37,11 @@ if [[ -z ${RUN_NAME} ]]; then
 fi
 
 source ${CONFIG_FILE}
+
+if [[ ! -s ${WORKERS_LIST_FILE} || ! -s ${SDS_LIST_FILE} ]]; then
+  echo "$(mydate) worker or sds file are either missing or empty..."
+  exit 1
+fi
 
 if [[ "${BENCHMARK_TOOL}" == "hammerdb" ]]; then
   readonly STATS_COUNT=$(((HAMMERDB_RAMPUP+WORKLOAD_RUNTIME+10)/STATS_INTERVAL))
@@ -62,10 +72,6 @@ else
   fi
 fi
 
-function mydate()
-{
-  date +%Y%m%d:%H:%M:%S:
-}
 
 function get_rbd_list()
 {
@@ -127,6 +133,7 @@ function prepare_run_command()
 
 function start_the_workload_job()
 {
+        #- image: quay.io/sagyvolkov/benchmark-container:sherlock0.3
   local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   local db_ip="${1}"
   prepare_run_command
@@ -143,10 +150,11 @@ spec:
         kubernetes.io/hostname: ${node_name}
       containers:
         - image: quay.io/sagyvolkov/benchmark-container:sherlock0.3
+          imagePullPolicy: Always
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
             limits:
-              memory: 2Gi
+              memory: ${BENCHMARK_POD_MEM_LIMIT}
           command:
                 - "bash"
                 - "-c"
