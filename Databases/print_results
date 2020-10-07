@@ -91,8 +91,9 @@ function print_perf_results()
   echo "-------------"
   for nodename in $(cat ${WORKERS_LIST_FILE})
   do
+    local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
     echo "${nodename}:"
-    grep SUMMARY ${run_dir}/stats-worker-*-${nodename}*.log | awk '{$1=""; print $0}' | cut -c 2-
+    grep SUMMARY ${run_dir}/stats-worker-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
   done
   echo ""
   if [[ "${WORKERS_LIST_FILE}" != "${SDS_LIST_FILE}" ]]; then
@@ -100,8 +101,9 @@ function print_perf_results()
     echo "----------"
     for nodename in $(cat ${SDS_LIST_FILE})
     do
+      local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
       echo "${nodename}:"
-      grep SUMMARY ${run_dir}/stats-sds-*-${nodename}*.log | awk '{$1=""; print $0}' | cut -c 2-
+      grep SUMMARY ${run_dir}/stats-sds-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
     done
   fi
 }
