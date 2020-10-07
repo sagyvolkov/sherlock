@@ -329,7 +329,7 @@ fi
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
-  node_name=${worker_node_array[${node_number}]}
+  node_name=$(oc get node ${worker_node_array[${node_number}]} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   pvc_name=${DB_PVC_PREFIX}-${j}
   pod_name=${DB_POD_PREFIX}-${j}
   echo "$(mydate) Creating ${DB_TYPE} database pod ${pod_name} on node ${node_name}"
