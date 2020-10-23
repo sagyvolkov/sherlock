@@ -41,8 +41,25 @@ function mydate()
  date +%Y%m%d:%H:%M:%S:
 }
 
-function create_postgresql_service()
+function create_service()
 {
+  case "${DB_TYPE}" in
+    postgresql)
+      port_number=5432
+      ;;
+    mysql)
+      port_number=3306
+      ;;
+    sqlserver)
+      port_number=1433
+      ;;
+    mongodb)
+      port_number=27017
+      ;;
+    *)
+      echo "Unknown database type..."
+  esac
+
   cat <<EOF | ${KUBE_CMD} create -f -
 apiVersion: v1
 kind: Service
@@ -52,13 +69,14 @@ metadata:
     app: ${pod_name}
   namespace: ${PROJECT_NAME}
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
-   - port: 5432
+   - port: ${port_number}
   selector:
    app: ${pod_name}
 EOF
 }
+
 
 function create_pvc()
 {
@@ -136,6 +154,66 @@ spec:
 EOF
 }
 
+function create_mongodb()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${pod_name}
+  namespace: ${PROJECT_NAME}
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${pod_name}
+  template:
+    metadata:
+      labels:
+        app: ${pod_name}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+      - name: ${pod_name}
+        image: mongo:latest
+        imagePullPolicy: "Always"
+        ports:
+        - containerPort: 27017
+        volumeMounts:
+        - mountPath: /data/db
+          name: mongodb
+        - mountPath: /docker-entrypoint-initdb.d
+          name: prep-ycsb
+        env:
+          - name: MONGO_INITDB_ROOT_PASSWORD
+            value: ${DB_PASSWORD}
+          - name: MONGO_INITDB_ROOT_USERNAME
+            value: ${DB_USERNAME}
+          - name: MONGO_INITDB_DATABASE
+            value: ${DB_NAME}
+        resources:
+          requests:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+          limits:
+            memory: ${DB_POD_MEM}
+            cpu: ${DB_POD_CPU}
+      volumes:
+      - name: mongodb
+        persistentVolumeClaim:
+          claimName: ${pvc_name}
+      - name: prep-ycsb
+        configMap:
+          name: prep-ycsb
+EOF
+}
+
 function create_mysql_config_map()
 {
   cat <<EOF | ${KUBE_CMD} create -f -
@@ -155,6 +233,29 @@ data:
     quick
     quote-names
     max_allowed_packet  = 16M
+EOF
+}
+
+function create_mongodb_config_map()
+{
+  cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prep-ycsb
+  namespace: ${PROJECT_NAME}
+data:
+  ensure-users.js: |
+    db.createUser({
+      user: '${DB_USERNAME}',
+      pwd: '${DB_PASSWORD}',
+      roles: [
+        {
+          role: 'readWrite',
+          db: '${DB_NAME}'
+        }
+      ]
+    });
 EOF
 }
 
@@ -217,27 +318,6 @@ spec:
       - name: mysql-custom-config
         configMap:
           name: mysql-custom-config
-EOF
-}
-
-function create_sqlserver_service()
-{
-  cat <<EOF | ${KUBE_CMD} create -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${pod_name}
-  labels:
-    app: ${pod_name}
-  namespace: ${PROJECT_NAME}
-spec:
-  type: LoadBalancer
-  ports:
-    - protocol: TCP
-      port: 31433
-      targetPort: 1433
-  selector:
-   app: ${pod_name}
 EOF
 }
 
@@ -326,6 +406,10 @@ if [[ "${DB_TYPE}" == "sqlserver" ]]; then
   create_secret
 fi
 
+if [[ "${DB_TYPE}" == "mongodb" ]]; then
+  create_mongodb_config_map
+fi
+
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
@@ -337,14 +421,19 @@ do
   case "${DB_TYPE}" in
     postgresql) 
       create_postgresql
-      create_postgresql_service
+      create_service
       ;;
     mysql)
       create_mysql
+      create_service
       ;;
     sqlserver)
       create_sqlserver
-      create_sqlserver_service
+      create_service
+      ;;
+    mongodb)
+      create_mongodb
+      create_service
       ;;
     *)
       echo "Unknown database type..."

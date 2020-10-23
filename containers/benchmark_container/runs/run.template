@@ -30,7 +30,7 @@ diset connection mssqls_tcp true
 diset connection mssqls_pass _ADMIN_PASSWORD_
 diset connection mssqls_server _SERVICE_IP_
 diset connection mssqls_linux_server _SERVICE_IP_
-diset connection mssqls_port 31433
+diset connection mssqls_port 1433
 diset connection mssqls_authentication sql
 diset tpcc mssqls_driver timed
 diset tpcc mssqls_rampup _RAMP_MINUTES_

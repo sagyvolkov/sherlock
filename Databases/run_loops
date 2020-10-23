@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [[ $# -eq 0 || $# -lt 3 ]]; then
+if [[ $# -eq 0 || $# -lt 4 ]]; then
  echo "Usage : $0 <run name> <number of loops> <benchmark: sysbench or hammerdb> <full path to sherlock config file>"
  exit 1
 fi
@@ -22,4 +22,5 @@ do
   oc delete jobs --all
 done
 popd
-${BASE_DIR}/print_results ${RUN_NAME} loop csv ${BENCHMARK_TOOL}
+config_file=$(basename ${CONFIG_FILE})
+${BASE_DIR}/print_results ${RUN_NAME} loop csv ${BENCHMARK_TOOL} ${config_file}

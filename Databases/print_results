@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [[ $# -eq 0 || $# -lt 4 ]]; then
- echo "Usage : $0 <logs directory> <single or loop run> <csv, simple or table format> <benchmark used: sysbench or hammerdb>"
+if [[ $# -eq 0 || $# -lt 5 ]]; then
+ echo "Usage : $0 <logs directory> <single or loop run> <csv, simple or table format> <benchmark used: sysbench, hammerdb or ycsb> <config file>"
  exit 1
 fi
 
@@ -83,24 +83,119 @@ function print_hammerdb_results_per_single_run()
     esac
 }
 
+function print_sysbench_results_per_single_run()
+{
+  local run_dir=${1}
+  let total_tps=0
+  let total_avg_latency=0
+  let total_latency_95=0
+  let number_of_logs_file=0
+  while read line
+  do
+    tps=$(echo "${line}" | awk -F'@' '{print $1}' | awk '{print $4}' | tr -d '(')
+    avg_latency=$(echo "${line}" | awk -F'@' '{print $2}' | awk '{print $3}' | tr -d ' ')
+    latency_95=$(echo "${line}" | awk -F'@' '{print $3}' | awk '{print $4}' | tr -d ' ')
+    total_tps=$(echo "${total_tps}" + "${tps}"|bc)
+    total_avg_latency=$(echo "${total_avg_latency}" + "${avg_latency}"|bc)
+    total_latency_95=$(echo "${total_latency_95}" + "${latency_95}"|bc)
+    (( number_of_logs_file++ ))
+  done < <(grep 'transactions\|avg:\|percentile:' ${run_dir}/*.log|grep -v CLEANUP|paste -d "@" - - -)
+  case "${OUTPUT_TYPE}" in
+    csv)
+      echo "${run_dir},$(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_latency_95}"/"${number_of_logs_file
+}"|bc)"
+      ;;
+    table)
+      echo "${run_dir},$(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_latency_95}"/"${number_of_logs_file
+}"|bc)" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|\n", $1, $2, $3, $4}'
+      ;;
+    simple)
+      echo "Run name: ${run_dir}"
+      echo "Average TPS for all databases: $(echo "scale=2;${total_tps}"/"${number_of_logs_file}"|bc)"
+      echo "Average latency for all databases: $(echo "scale=2;${total_avg_latency}"/"${number_of_logs_file}"|bc)"
+      echo "Average 95% latency for all databases: $(echo "scale=2;${total_latency_95}"/"${number_of_logs_file}"|bc)"
+      ;;
+    *)
+      echo "Unknown output type"
+      exit 1
+      ;;
+    esac
+}
+
+function print_ycsb_results_per_single_run()
+{
+  local run_dir=${1}
+  let total_ops=0
+  let total_avg_read_latency=0
+  let total_avg_write_latency=0
+  let total_read_latency_95=0
+  let total_write_latency_95=0
+  let number_of_logs_file=0
+  while read line
+  do
+    ops=$(echo "${line}" | awk -F'@' '{print $1}' | awk -F, '{print $3}')
+    avg_read_latency=$(echo "${line}" | awk -F'@' '{print $2}' | awk -F, '{print $3}')
+    avg_write_latency=$(echo "${line}" | awk -F'@' '{print $4}' | awk -F, '{print $3}')
+    read_latency_95=$(echo "${line}" | awk -F'@' '{print $3}' | awk -F, '{print $3}')
+    write_latency_95=$(echo "${line}" | awk -F'@' '{print $5}' | awk -F, '{print $3}')
+    total_ops=$(echo "${total_ops}" + "${ops}"|bc)
+    total_avg_read_latency=$(echo "${total_avg_read_latency}" + "${avg_read_latency}"|bc)
+    total_avg_write_latency=$(echo "${total_avg_write_latency}" + "${avg_write_latency}"|bc)
+    total_read_latency_95=$(echo "${total_read_latency_95}" + "${read_latency_95}"|bc)
+    total_write_latency_95=$(echo "${total_write_latency_95}" + "${write_latency_95}"|bc)
+    (( number_of_logs_file++ ))
+  done < <(grep 'Throughput\|\[READ\], AverageLatency\|\[UPDATE\], AverageLatency\|\[READ\], 95thPercentileLatency(us)\|\[UPDATE\], 95thPercentileLatency(us)' ${run_dir}/*.log|paste -d "@" - - - - -)
+  case "${OUTPUT_TYPE}" in
+    csv)
+      echo "${run_dir},$(echo "scale=2;${total_ops}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_read_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_write_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_read_latency_95}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_write_latency_95}"/"${number_of_logs_file}"|bc)"
+      ;;
+    table)
+      echo "${run_dir},$(echo "scale=2;${total_ops}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_read_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_avg_write_latency}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_read_latency_95}"/"${number_of_logs_file}"|bc),$(echo "scale=2;${total_write_latency_95}"/"${number_of_logs_file}"|bc)"| awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|%-17s|%17-s|\n", $1, $2, $3, $4, $5, $6}'
+      ;;
+    simple)
+      echo "Run name: ${run_dir}"
+      echo "Average Operations Per Seconds for all databases: $(echo "scale=2;${total_ops}"/"${number_of_logs_file}"|bc)"
+      echo "Average read latency for all databases: $(echo "scale=2;${total_avg_read_latency}"/"${number_of_logs_file}"|bc)"
+      echo "Average write latency for all databases: $(echo "scale=2;${total_avg_write_latency}"/"${number_of_logs_file}"|bc)"
+      echo "Average 95% read latency for all databases: $(echo "scale=2;${total_read_latency_95}"/"${number_of_logs_file}"|bc)"
+      echo "Average 95% write latency for all databases: $(echo "scale=2;${total_write_latency_95}"/"${number_of_logs_file}"|bc)"
+      ;;
+    *)
+      echo "Unknown output type"
+      exit 1
+      ;;
+    esac
+}
+
 function print_perf_results()
 {
   local run_dir=${1}
-  source ${run_dir}/sherlock.config > /dev/null 2>&1
-  echo "Worker nodes:"
-  echo "-------------"
-  for nodename in $(cat ${WORKERS_LIST_FILE})
-  do
-    local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
-    echo "${nodename}:"
-    grep SUMMARY ${run_dir}/stats-worker-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
-  done
-  echo ""
+  source ${run_dir}/${CONFIG_FILE} > /dev/null 2>&1
+  
   if [[ "${WORKERS_LIST_FILE}" != "${SDS_LIST_FILE}" ]]; then
+    echo "Worker nodes:"
+    echo "-------------"
+    for nodename in $(cat ${WORKERS_LIST_FILE})
+    do
+      local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+      echo "${nodename}:"
+      grep SUMMARY ${run_dir}/stats-worker-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
+    done
+    echo ""
     echo "SDS nodes:"
     echo "----------"
     for nodename in $(cat ${SDS_LIST_FILE})
     do
+      local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+      echo "${nodename}:"
+      grep SUMMARY ${run_dir}/stats-sds-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
+    done
+  else
+    echo "SDS + Worker nodes:"
+    echo "-------------------"
+    for nodename in $(cat ${SDS_LIST_FILE})
+    do
+      echo "nodename=${nodename}"
       local node_name=$(oc get node ${nodename} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
       echo "${nodename}:"
       grep SUMMARY ${run_dir}/stats-sds-*-${node_name}*.log | awk '{$1=""; print $0}' | cut -c 2-
@@ -126,7 +221,8 @@ function print_loop()
       echo -e "\nPrinting OS stats for run ${run_dir}:\n"
       print_perf_results ${run_dir}
     done
-  else
+  fi
+  if [[ "${BENCHMARK_TOOL}" == "hammerdb" ]]; then
     if [[ "${OUTPUT_TYPE}" == "table" ]]; then
       echo "Run number,Average TPM of,Average NOPM of,Average 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
       echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-15s|\n", $1, $2, $3}'
@@ -142,6 +238,23 @@ function print_loop()
       print_perf_results ${run_dir}
     done
   fi
+  if [[ "${BENCHMARK_TOOL}" == "ycsb" ]]; then
+    if [[ "${OUTPUT_TYPE}" == "table" ]]; then
+      echo "Run number,Average OPM of,Average read latency of,Average write latency of,Average read 95% latency,Average write 95% latency" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|%-17s|%17-s|\n", $1, $2, $3, $4, $5, $6}'
+      echo " ,all databases,for all databases,for all databases" | awk -F, '{printf "|%-10s|%-15s|%-17s|%17-s|%-17s|%17-s|\n", $1, $2, $3, $4, $5, $6}'
+      echo "----------------------------------------------------------------------"
+    fi
+    for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
+    do
+      print_ycsb_results_per_single_run ${run_dir}
+    done
+    for run_dir in $(ls -d run* | sort -n -k1.4,1.6)
+    do
+      echo -e "\nPrinting OS stats for run ${run_dir}:\n"
+      print_perf_results ${run_dir}
+    done
+  fi
+
   popd
 }
 
@@ -153,8 +266,13 @@ case "${RUN_TYPE}" in
         echo ""
         print_perf_results ${LOG_DIR}
         ;;
-      *)
+      sysbench)
         print_sysbench_results_per_single_run ${LOG_DIR}
+        echo ""
+        print_perf_results ${LOG_DIR}
+        ;;
+      ycsb)
+        print_ycsb_results_per_single_run ${LOG_DIR}
         echo ""
         print_perf_results ${LOG_DIR}
         ;;

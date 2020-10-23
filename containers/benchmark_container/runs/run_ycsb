@@ -1,0 +1,70 @@
+#!/bin/bash
+
+readonly DB_TYPE=${1}
+readonly YCSB_ACTION=${2}
+readonly SERVICE_IP=${3}
+readonly YCSB_WORKLOAD=${4}
+readonly THREADS=${5}
+readonly DB_USERNAME=${6}
+readonly DB_PASSWORD=${7}
+readonly DB_NAME=${8}
+readonly YCSB_RECORDCOUNT=${9}
+readonly YCSB_OPERATIONCOUNT=${10}
+readonly YCSB_DISTRIBUTION=${11}
+readonly YCSB_READPROPORTION=${12}
+readonly YCSB_UPDATEPROPORTION=${13}
+readonly YCSB_MAXEXECUTIONTIME=${14}
+
+function create_data()
+{
+  ./bin/ycsb load mongodb -s -threads ${THREADS} \
+  -P "workloads/${YCSB_WORKLOAD}" \
+  -p mongodb.url=mongodb://${DB_USERNAME}:${DB_PASSWORD}@${SERVICE_IP}:27017/${DB_NAME} \
+  -p recordcount=${YCSB_RECORDCOUNT} \
+  -p requestdistribution=${YCSB_DISTRIBUTION} \
+  -p mongodb.writeConcern=acknowledged \
+  -p core_workload_insertion_retry_limit=5 \
+  -p core_workload_insertion_retry_interval=5 
+}
+
+function run_ycsb()
+{
+  ./bin/ycsb run mongodb -s -threads ${THREADS} \
+  -P "workloads/${YCSB_WORKLOAD}" \
+  -p mongodb.url=mongodb://${DB_USERNAME}:${DB_PASSWORD}@${SERVICE_IP}:27017/${DB_NAME} \
+  -p recordcount=${YCSB_RECORDCOUNT} \
+  -p operationcount=${YCSB_OPERATIONCOUNT} \
+  -p requestdistribution=${YCSB_DISTRIBUTION} \
+  -p readproportion=${YCSB_READPROPORTION} \
+  -p updateproportion=${YCSB_UPDATEPROPORTION} \
+  -p mongodb.writeConcern=acknowledged \
+  -p wtimeout=10000 \
+  -p maxexecutiontime=${YCSB_MAXEXECUTIONTIME} \
+  -p writeallfields=true 
+}
+
+function drop_collection()
+{
+  echo "Deleting usertable collection..."
+  mongo mongodb://${DB_USERNAME}:${DB_PASSWORD}@${SERVICE_IP}:27017/${DB_NAME} --eval "db.usertable.drop()"
+  echo "Collection deleted..."
+}
+
+pushd /ycsb
+
+case "${YCSB_ACTION}" in
+  prepare)
+    echo "Loading data using YCSB..."
+    create_data
+    ;;
+  run)
+    run_ycsb
+    ;;
+  cleanup)
+    drop_collection
+    ;;
+  *)
+    echo "Unknown action..."
+esac
+
+popd
