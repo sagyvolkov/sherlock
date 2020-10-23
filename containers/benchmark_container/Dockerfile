@@ -8,9 +8,9 @@ RUN dnf -y install mysql net-tools mysql-libs mysql-devel libtool make which git
 RUN dnf -y install java-1.8.0-openjdk mongodb-org-shell; dnf clean all
 RUN curl -s https://packagecloud.io/install/repositories/akopytov/sysbench/script.rpm.sh | bash
 RUN dnf -y install sysbench; dnf clean all
-RUN tar zxvf /tmp/mongo-only-ycsb-0.15.0.gz
-RUN mv ycsb-0.15.0 ycsb
-RUN rm /tmp/mongo-only-ycsb-0.15.0.gz
+RUN tar zxvf /tmp/ycsb-0.17.0_mongo_redis.tgz
+RUN mv ycsb-0.17.0_mongo_redis ycsb
+RUN rm /tmp/ycsb-0.17.0_mongo_redis.tgz
 
 RUN dnf install -y --nodocs tcl unixODBC
 RUN curl https://packages.microsoft.com/config/rhel/8/prod.repo -o /etc/yum.repos.d/mssql-release.repo
@@ -22,6 +22,9 @@ COPY HammerDB-3.3-Linux-x86-64-Install HammerDB-3.3-Linux-x86-64-Install
 RUN mkdir /hammerdb
 RUN chmod 755 HammerDB-3.3-Linux-x86-64-Install
 RUN ./HammerDB-3.3-Linux-x86-64-Install --prefix /hammerdb --mode silent
+
+RUN dnf -y install python27
+RUN alternatives --set python /usr/bin/python2
 
 RUN mkdir scripts
 WORKDIR scripts

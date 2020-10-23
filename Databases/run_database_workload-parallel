@@ -55,7 +55,7 @@ declare -A worker_rbd
 
 if [ "$(uname -s)" == "Linux" ];then
   if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
-    mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
+    mapfile -t sds_node_array < <(cat ${WORKERS_LIST_FILE})
   else
     mapfile -t worker_node_array < <(cat ${WORKERS_LIST_FILE})
     mapfile -t sds_node_array < <(cat ${SDS_LIST_FILE})
@@ -63,7 +63,7 @@ if [ "$(uname -s)" == "Linux" ];then
 else
   if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
     declare -a worker_node_array
-    while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
+    while IFS= read -r line; do sds_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
   else
     declare -a worker_node_array
     while IFS= read -r line; do worker_node_array+=("$line"); done < <(cat ${WORKERS_LIST_FILE})
@@ -128,12 +128,14 @@ function prepare_run_command()
         ;;
     esac
   fi
+  if [[ "${BENCHMARK_TOOL}" == "ycsb" ]]; then
+    run_command="./run_ycsb ${DB_TYPE} ${JOB_TYPE} ${db_ip} ${YCSB_WORKLOAD} ${THREADS} ${DB_USERNAME} ${DB_PASSWORD} ${DB_NAME} ${YCSB_RECORDCOUNT} ${YCSB_OPERATIONCOUNT} ${YCSB_DISTRIBUTION} ${YCSB_READPROPORTION} ${YCSB_UPDATEPROPORTION} ${WORKLOAD_RUNTIME}"
+  fi
   if ${DEBUG}; then echo "$(mydate)-run_command=${run_command}";fi
 }
 
 function start_the_workload_job()
 {
-        #- image: quay.io/sagyvolkov/benchmark-container:sherlock0.3
   local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   local db_ip="${1}"
   prepare_run_command
@@ -149,7 +151,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.3
+        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.5
           imagePullPolicy: Always
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:
@@ -262,20 +264,24 @@ function calculate_rbd_utilization()
 
 if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
   oc adm policy add-scc-to-user hostnetwork -n${PROJECT_NAME} -z default
-  stats_collect worker ${worker_node_array[@]}
-  [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+    [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+  else
+    stats_collect worker ${worker_node_array[@]}
+    [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+  fi
 fi
 
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
-  node_name=${worker_node_array[${node_number}]}
-  deployment_name=${DB_POD_PREFIX}-${j}
-  if [[ "${DB_TYPE}" == "pgsql" || "${DB_TYPE}" == "sqlserver" ]]; then
-    database_ip=$(${KUBE_CMD} get svc -n ${PROJECT_NAME} ${deployment_name} -o jsonpath='{.spec.clusterIP}')
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+    node_name=${sds_node_array[${node_number}]}
   else
-    database_ip=$(${KUBE_CMD} get pod -l app=${deployment_name} -o jsonpath='{.items[].status.podIP}')
+    node_name=${worker_node_array[${node_number}]}
   fi
+  deployment_name=${DB_POD_PREFIX}-${j}
+  database_ip=$(${KUBE_CMD} get svc -n ${PROJECT_NAME} ${deployment_name} -o jsonpath='{.spec.clusterIP}')
   echo "$(mydate) Starting ${BENCHMARK_TOOL} job for ${JOB_TYPE} in deployment ${deployment_name} with database ip ${database_ip} ..."
   start_the_workload_job ${database_ip}
   jobs_pods[${job_name}]=${workload_pod_name}
