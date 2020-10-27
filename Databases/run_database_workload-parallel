@@ -318,7 +318,11 @@ if [[ "${JOB_TYPE}" == "run" ]];then
     get_rbd_list
     for node_ip in ${!worker_rbd[@]}
     do
-      file_name=$(ls ${RUN_NAME}/stats-worker-${RUN_NAME}-${node_ip}*.log)
+      if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+        file_name=$(ls ${RUN_NAME}/stats-sds-${RUN_NAME}-${node_ip}*.log)
+      else
+        file_name=$(ls ${RUN_NAME}/stats-worker-${RUN_NAME}-${node_ip}*.log)
+      fi
       rbd_device="${worker_rbd[${node_ip}]}"
       calculate_rbd_utilization ${file_name} "${rbd_device}"
     done
