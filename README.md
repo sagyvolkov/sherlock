@@ -22,46 +22,75 @@ The project was initially tested on Rook/Ceph and Openshift Container Storage (O
 Other non-SDS storage providers will work as well, all you have to do is change the storage class that project is using and the databases will be deployed and output such TPS/TPM/NOPM, latency and so on will be provided, however, the performance statistics collection should only be used for Software Define Storage (SDS) type of storage that runs on nodes part of the Kuberenetes cluster.
 
 ## Requirements
-
-The only real requirement is bash > 4.0 (associative arrays are heavily used here).
+### Bash version
+bash > 4.0 (associative arrays are heavily used here).<br/>
 (for macOS, just "brew install bash", then either use "#!/usr/local/bin/bash" instead of "#!/bin/bash" in the scripts or update /etc/shells). 
 
-### Deployments
+### list of nodes
+Sherlock depends heavily on the settings of WORKERS_LIST_FILE and SDS_LIST_FILE variables in the config file.<br/>
+Each of these variables points to a file that hold the name of the nodes for a particular role.
+For Example:
+```bash
+#cat ~/sds_nodes
+ip-10-0-146-82.us-west-2.compute.internal
+ip-10-0-162-232.us-west-2.compute.internal
+ip-10-0-172-204.us-west-2.compute.internal
+```
+
+#### Converge:
+Converge refers to when your run the SDS and the database pods on the same nodes. 
+In this case, both WORKERS_LIST_FILE and SDS_LIST_FILE should point to the *same* file.
+#### Non-Converge:
+Non-Converge refer to when you run the SDS on separate nodes than where the database pods are running.
+In this case, WORKERS_LIST_FILE and SDS_LIST_FILE will each point to a *different* file with *different* node list in each file.
+
+## Deployment of sherlock
 
 Nothing to actually deploy. just grab the scripts from the repo.
 
+## How to run
 ### Database creation
 Once you figured the number of databases per node, the pod resources and the size of each database and configure it in the sherlock.conf file, all you need to do is run:
 ```bash
-create_databases
+create_databases -c <path to config file>
 ```
+Note: if you don't supply a config file, sherlock will assume that sherlock.config is the name of the config file and that it is located in the current directory.
 ### Preparing data
 #### Sysbench:
 ```bash
-run_database_workload-parallel -b sysbench -j prepare -c <path to config>
+run_database_workload-parallel -b sysbench -j prepare -c <path to config file>
 ```
 #### Pgbench
 ```bash
-run_database_workload-parallel -b pgbench -j prepare -c <path to config>
+run_database_workload-parallel -b pgbench -j prepare -c <path to config file>
 ```
 #### HammerDB
 ```bash
-run_database_workload-parallel -b hammerdb -j prepare -c <path to config>
+run_database_workload-parallel -b hammerdb -j prepare -c <path to config file>
 ```
-
+#### YCSB
+```bash
+run_database_workload-parallel -b ycsb -j prepare -c <path to config file>
+```
+Note: if you don't supply a config file, sherlock will assume that sherlock.config is the name of the config file and that it is located in the current directory.
 ### Running a workload
 #### Sysbench:
 ```bash
-run_database_workload-parallel -b sysbench -j run -c <path to config> -n <some name for the run>
+run_database_workload-parallel -b sysbench -j run -c <path to config file> -n <some name for the run>
 ```
 #### Pgbench
 ```bash
-run_database_workload-parallel -b pgbench -j run -c <path to config> -n <some name for the run>
+run_database_workload-parallel -b pgbench -j run -c <path to config file> -n <some name for the run>
 ```
 #### HammerDB
 ```bash
-run_database_workload-parallel -b hammerdb -j run -c <path to config> -n <some name for the run>
+run_database_workload-parallel -b hammerdb -j run -c <path to config file> -n <some name for the run>
 ```
+#### YCSB
+```bash
+run_database_workload-parallel -b ycsb -j run -c <path to config file> -n <some name for the run>
+```
+Note: if you don't supply a config file, sherlock will assume that sherlock.config is the name of the config file and that it is located in the current directory.
 
 ### List of files/scripts in the
 _create_databases_ - Create databases based on parameters from the config file. the script will make sure to spread the database equally on nodes that are part of the WORKERS_LIST_FILE variable.
