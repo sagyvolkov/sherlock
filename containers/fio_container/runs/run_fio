@@ -1,0 +1,50 @@
+#!/bin/bash
+
+if [ $# -ne 10 ]; then
+ echo "Usage : $0 <some parameters>"
+ exit 1
+fi
+
+readonly RWMIXWRITE=${1}
+readonly BLOCK_SIZE=${2}
+readonly FILE_NAME=${3}
+readonly RUNTIME=${4}
+readonly JOBS=${5}
+readonly IODEPTH=${6}
+readonly WORKSIZE=${7}
+readonly DEVICE_TYPE=${8}
+readonly DIRECT_IO=${9} # use direct=1 to do async without caches. 
+readonly IO_PATTERN=${10} #readwrite for sequencial read/write, randrw for random read/write
+
+function fio_run()
+{
+  if [[ "${DEVICE_TYPE}" == "FS" ]];then
+    type_of_device="--directory"
+  else
+    type_of_device="--filename"
+  fi
+  fio --name=myfiotest \
+  --readwrite=${IO_PATTERN} \
+  --rwmixwrite=${RWMIXWRITE} \
+  --bs=${BLOCK_SIZE} \
+  --invalidate=1 \
+  --group_reporting \
+  ${type_of_device}=${FILE_NAME} \
+  --time_based \
+  --direct=${DIRECT_IO} \
+  --fsync=0 \
+  --fdatasync=0 \
+  --pre_read=0 \
+  --runtime=${RUNTIME} \
+  --ioengine=libaio \
+  --numjobs=${JOBS} \
+  --iodepth=${IODEPTH} \
+  --norandommap \
+  --randrepeat=0 \
+  --exitall \
+  --filesize=${WORKSIZE} \
+  --minimal \
+  --output-format=normal 
+}
+
+fio_run
