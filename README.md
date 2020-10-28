@@ -249,7 +249,7 @@ total 868
 -rw-rw-r--. 1 sagy sagy   5193 Sep 24 06:10 sysbench-run-postgresql-4-psql1-nnzwt-ktscv.log
 -rw-rw-r--. 1 sagy sagy   5196 Sep 24 06:10 sysbench-run-postgresql-5-psql1-bvd8c-kl89z.log
 ```
-The psql1 (the name in our example for the run) holds the following files:
+The psql1 directory (the name in our example for the run) holds the following files:
 - logs from the jobs/pods running sysbench (file name that start with the benchmark we used, in our case sysbench)
 - logs from the jobs/pods running stats from the nodes running the databases (file name that start with stats-worker)
 - logs from the jobs/pods running stats from the nodes the SDS (file name start with stats-sds)
@@ -267,7 +267,7 @@ The _print_results_ have other options as well, please explore them.
 If you are intrested in the performance statistics, you can either view the stats files or run a simple grep on the worker or SDS stats files:
 ```bash
 
-e ## ToDo:VERAGE stats-sds*
+? grep AVERAGE stats-sds*
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE EBS device nvme0n1 read/s: 2412.72, write/s: 6786.71, utilization%: 65.54
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE EBS device nvme1n1 read/s: 2398.97, write/s: 6549.72, utilization%: 59.72
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE RX: 27.89GB
