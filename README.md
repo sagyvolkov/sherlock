@@ -267,7 +267,7 @@ The _print_results_ have other options as well, please explore them.
 If you are intrested in the performance statistics, you can either view the stats files or run a simple grep on the worker or SDS stats files:
 ```bash
 
-? grep AVERAGE stats-sds*
+[sagy@bastion psql1]$ grep AVERAGE stats-sds*
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE EBS device nvme0n1 read/s: 2412.72, write/s: 6786.71, utilization%: 65.54
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE EBS device nvme1n1 read/s: 2398.97, write/s: 6549.72, utilization%: 59.72
 stats-sds-psql1-vaelin-nkmld-cephnode-eastus21-5c7xj-fmdj2kswrt.log:AVERAGE RX: 27.89GB
