@@ -199,7 +199,7 @@ function run_stats()
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: stats-${node_type}-${RUN_NAME}-${node_name}-
+  generateName: stats-${node_type}-${RUN_NAME}-node${node_number}-
 spec:
   template:
     spec:
@@ -230,8 +230,9 @@ function stats_collect()
   local node_type=${1}
   shift 1
   local local_array=("$@")
-  for node_name in ${local_array[@]}
+  for node_number in ${!local_array[@]}
   do
+    node_name=${local_array[${node_number}]}
     echo "$(mydate) Starting to collect stats on ${node_type} node ${node_name}..."
     run_stats "${node_type}" "${local_array[@]}"
     jobs_pods[${job_name}]=${stats_pod_name}
@@ -297,6 +298,8 @@ if [[ "${JOB_TYPE}" == "run" ]];then
   fi
 
   cp ${CONFIG_FILE} ${RUN_NAME}/
+  cp ${WORKERS_LIST_FILE} ${RUN_NAME}/
+  cp ${SDS_LIST_FILE} ${RUN_NAME}/
   job_list=""
 
   for i in "${!jobs_pods[@]}"
