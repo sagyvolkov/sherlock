@@ -244,17 +244,17 @@ case "${RUN_TYPE}" in
       hammerdb)
         print_hammerdb_results_per_single_run ${LOG_DIR}
         echo ""
-        print_perf_results ${LOG_DIR}
+        [[ "${STATS}" == "true" ]] && print_perf_results ${LOG_DIR}
         ;;
       sysbench)
         print_sysbench_results_per_single_run ${LOG_DIR}
         echo ""
-        print_perf_results ${LOG_DIR}
+        [[ "${STATS}" == "true" ]] &&print_perf_results ${LOG_DIR}
         ;;
       ycsb)
         print_ycsb_results_per_single_run ${LOG_DIR}
         echo ""
-        print_perf_results ${LOG_DIR}
+        [[ "${STATS}" == "true" ]] &&print_perf_results ${LOG_DIR}
         ;;
     esac
     ;;

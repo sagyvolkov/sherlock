@@ -32,8 +32,7 @@ do
   ${KUBE_CMD} delete deployment ${pod_name}
   echo "$(mydate) Deleting PVC ${pvc_name}..."
   ${KUBE_CMD} delete pvc ${pvc_name}
-  if [[ "${DB_TYPE}" != "mysql" ]]; then
-    echo "$(mydate) Deleting service ${pod_name}..."
-    ${KUBE_CMD} delete service ${pod_name}
-  fi
+  echo "$(mydate) Deleting service ${pod_name}..."
+  ${KUBE_CMD} delete service ${pod_name}
 done
+${KUBE_CMD} delete namespace ${NAMESPACE_NAME}

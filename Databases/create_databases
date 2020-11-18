@@ -67,7 +67,7 @@ metadata:
   name: ${pod_name}
   labels:
     app: ${pod_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   type: ClusterIP
   ports:
@@ -85,7 +85,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: ${pvc_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   storageClassName: ${STORAGE_CLASS}
   accessModes:
@@ -103,7 +103,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${pod_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   strategy:
     rollingUpdate:
@@ -161,7 +161,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${pod_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   strategy:
     rollingUpdate:
@@ -221,7 +221,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mysql-custom-config
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 data:
   mysql.ocs.cnf: |
     [mysqld]
@@ -243,7 +243,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: prep-ycsb
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 data:
   ensure-users.js: |
     db.createUser({
@@ -266,7 +266,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${pod_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   strategy:
     rollingUpdate:
@@ -328,7 +328,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${pod_name}
-  namespace: ${PROJECT_NAME}
+  namespace: ${NAMESPACE_NAME}
 spec:
   strategy:
     rollingUpdate:
@@ -382,24 +382,24 @@ EOF
 
 function create_secret()
 {
- oc create secret generic sqlserver --from-literal=SA_PASSWORD=${SA_PASSWORD} -n ${PROJECT_NAME}
+ oc create secret generic sqlserver --from-literal=SA_PASSWORD=${SA_PASSWORD} -n ${NAMESPACE_NAME}
 }
 
-if ! oc get projects|grep -w ${PROJECT_NAME} > /dev/null; then 
+if ! ${KUBE_CMD} get namespaces|grep -w ${NAMESPACE_NAME} > /dev/null; then 
   if [[ "${KUBE_CMD}" == "oc" ]]; then
-    ${KUBE_CMD} new-project ${PROJECT_NAME}
+    ${KUBE_CMD} new-project ${NAMESPACE_NAME}
   else
-    ${KUBE_CMD} create new namespace ${PROJECT_NAME}
+    ${KUBE_CMD} create new namespace ${NAMESPACE_NAME}
   fi
 fi
 
 if [[ "${DB_TYPE}" == "mysql" ]]; then
-  if [[ ! $(oc get configmap --no-headers -o custom-columns=:metadata.name) == "mysql-custom-config" ]]; then
+  if [[ ! $(${KUBE_CMD} get configmap --no-headers -o custom-columns=:metadata.name) == "mysql-custom-config" ]]; then
     echo "$(mydate) Creating MySQL configfile ..."
     create_mysql_config_map
   fi
   echo "$(mydate) Making sure group scc is set for MySQL pods ..."
-  oc adm policy add-scc-to-group anyuid system:authenticated -n${PROJECT_NAME}
+  oc adm policy add-scc-to-group anyuid system:authenticated -n${NAMESPACE_NAME}
 fi
 
 if [[ "${DB_TYPE}" == "sqlserver" ]]; then
@@ -413,7 +413,7 @@ fi
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
-  node_name=$(oc get node ${worker_node_array[${node_number}]} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  node_name=$(${KUBE_CMD} get node ${worker_node_array[${node_number}]} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   pvc_name=${DB_PVC_PREFIX}-${j}
   pod_name=${DB_POD_PREFIX}-${j}
   echo "$(mydate) Creating ${DB_TYPE} database pod ${pod_name} on node ${node_name}"
