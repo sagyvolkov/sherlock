@@ -79,13 +79,13 @@ function get_rbd_list()
   for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
   do
     deployment_name=${DB_POD_PREFIX}-${j}
-    claim_name=$(oc get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.volumes[].persistentVolumeClaim.claimName}')
-    volume_name=$(oc get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
+    claim_name=$(${KUBE_CMD} get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.volumes[].persistentVolumeClaim.claimName}')
+    volume_name=$(${KUBE_CMD} get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
     pvc_array[${j}]=${volume_name}
   done
   for node_name in $(cat $WORKERS_LIST_FILE)
   do
-    local host_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+    local host_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
     rbd_line=""
     node_pvc=$(oc debug node/${node_name} -- lsblk | grep rbd | awk '{print $1"@@"$7}')
     for lsblk_line in $(echo ${node_pvc})
@@ -136,7 +136,7 @@ function prepare_run_command()
 
 function start_the_workload_job()
 {
-  local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  local node_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   local db_ip="${1}"
   prepare_run_command
   job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
@@ -171,7 +171,7 @@ workload_pod_name=$(${KUBE_CMD} describe ${job_name} | grep "Created pod:" | awk
 function find_taints()
 {
  local node_name="${1}"
- local node_taint=$(oc get node ${node_name} -o jsonpath='{.spec.taints[0].effect}{"ZZZ"}{.spec.taints[0].key}{"ZZZ"}{.spec.taints[0].value}')
+ local node_taint=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.spec.taints[0].effect}{"ZZZ"}{.spec.taints[0].key}{"ZZZ"}{.spec.taints[0].value}')
  if [[ ${node_taint} != "ZZZZZZ" ]];then
    toleration_effect=$(echo "${node_taint}" | awk -F"ZZZ" '{print $1}')
    toleration_key=$(echo "${node_taint}" | awk -F"ZZZ" '{print $2}')
@@ -194,7 +194,7 @@ function run_stats()
     echo "$(mydate) Checking for tolerations in sds node ${node_name}..."
     toleration=$(find_taints ${node_name})
   fi  
-  local node_name=$(oc get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  local node_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
   job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
 apiVersion: batch/v1
 kind: Job
@@ -262,9 +262,8 @@ function calculate_rbd_utilization()
       echo "NODE: ${node_ip}, AVERAGE RBD device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}" >> ${file_name}
   done
 }
-
 if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
-  oc adm policy add-scc-to-user hostnetwork -n${PROJECT_NAME} -z default
+  [[ "${KUBE_CMD}" == "oc" ]] && oc adm policy add-scc-to-user hostnetwork -n${NAMESPACE_NAME} -z default
   if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
     [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
   else
@@ -282,7 +281,7 @@ do
     node_name=${worker_node_array[${node_number}]}
   fi
   deployment_name=${DB_POD_PREFIX}-${j}
-  database_ip=$(${KUBE_CMD} get svc -n ${PROJECT_NAME} ${deployment_name} -o jsonpath='{.spec.clusterIP}')
+  database_ip=$(${KUBE_CMD} get svc -n ${NAMESPACE_NAME} ${deployment_name} -o jsonpath='{.spec.clusterIP}')
   echo "$(mydate) Starting ${BENCHMARK_TOOL} job for ${JOB_TYPE} in deployment ${deployment_name} with database ip ${database_ip} ..."
   start_the_workload_job ${database_ip}
   jobs_pods[${job_name}]=${workload_pod_name}
