@@ -103,6 +103,8 @@ _print_results_ - Use this script to display the results of _run_database_worklo
 
 _sherlock.config_ - a the sherlock config file. You can rename the config file, just make sure to provide the correct name and path when you run sherlock.
 
+_delete_databases_ - a script to cleanup/delete all that was created with _create_databases_
+
 ### fio
 The Flexible I/O (fio) tester is a well known artificial workload generator with many options to test storage devices.
 While I prefer to test with real-life workloads, fio is a very fast tool to measure performance of SDS, so I've created a very small pod that just runs fio and it can help with SDS assessment.
@@ -291,11 +293,10 @@ You can use the _delete_databases_ script to delete all objects created by _crea
 ### TODO (in no particular order of importance):
 1. Adding PCP (Performance Co-Pilot) as a stats pods vs plain sysstat data. You will be able to choose between type of stats collection, but the PCP stats are going to be a lot more comprehensive and includes also graphs.
 2. List of SDS devices per node (vs per cluster)
-3. Adding MongoDB using YCSB
-4. Adding redis using YCSB
-5. Move to Python or at least have a version in python.
-6. Maybe operatorize the scripts :)
-7. Add the ability to use "-j run" without waiting for the jobs to finish and without collecting the logs.
-8. Run create_database without wait and in parallel.
+3. Adding redis using YCSB
+4. Move to Python or at least have a version in python.
+5. Add the ability to use "-j run" without waiting for the jobs to finish and without collecting the logs.
+6. Run create_database without wait and in parallel.
+7. Maybe operatorize the scripts :)
 
 \*(sherlock aschii image courtesy of hjm)
