@@ -39,7 +39,7 @@ ip-10-0-172-204.us-west-2.compute.internal
 
 #### Converge:
 Converge refers to when your run the SDS and the database pods on the same nodes. 
-In this case, both WORKERS_LIST_FILE and SDS_LIST_FILE **MUST** point to the **SAME** file.
+In this case, both the WORKERS_LIST_FILE and SDS_LIST_FILE variables **MUST** point to the **SAME** file.
 #### Non-Converge:
 Non-Converge refer to when you run the SDS on separate nodes than where the database pods are running.
 In this case, WORKERS_LIST_FILE and SDS_LIST_FILE will each point to a *different* file with *different* node list in each file.
