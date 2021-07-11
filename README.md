@@ -1,4 +1,4 @@
-# Sherlock - the old skool detective for database performance on OCP
+# Sherlock - the old skool detective for database performance on Kubernetes/OpenShift
 
 <pre>
    ,_       
