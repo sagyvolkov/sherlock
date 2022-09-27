@@ -83,7 +83,7 @@ readonly BENCHMARK_POD_MEM_LIMIT=2Gi
 #
 
 # The binary used to run the scripts, kubectl or oc
-readonly KUBE_CMD=oc
+readonly KUBE_CMD=kubectl
 
 # The number of worker nodes to deploy DBs on. if the number is smaller than nodes in WORKERS_LIST_FILE, not all worker nodes will be used.
 readonly NUMBER_OF_WORKERS=3
@@ -126,15 +126,15 @@ readonly DB_POD_MEM=2Gi
 readonly DB_POD_CPU=1
 
 # Self explanatory
-readonly DB_NAME=redhat
-readonly DB_USERNAME=redhat
-readonly DB_PASSWORD=redhat
+readonly DB_NAME=sherlock
+readonly DB_USERNAME=sherlock
+readonly DB_PASSWORD=sherlock
 
 # For SQL server we must use an admin password that is complex, if you change it, make sure it has at least 8 characters long, lower and upper case and includes a number as well.
 readonly SA_PASSWORD=RHsqlserver2019
 
 # What storage class to use to create the PVCs that the databases will used. This will derive from whatever SDS you are testing.
-readonly STORAGE_CLASS=ocs-storagecluster-ceph-rbd
+readonly STORAGE_CLASS=my_storage_class
 
 
 #
@@ -151,15 +151,28 @@ readonly STATS_INTERVAL=10
 # list of the sds devices (seperated by space) that are used for the SDS, for example, if the OSD devices are /dev/sdd and /dev/sde the value should be "sdd sde"
 readonly SDS_DEVICES="nvme0n1 nvme1n1"
 
-# list of the sds network interface/s (seperated by space) that are used by the SDS. These are only being monitored on nodes in SDS_LIST_FILE.
-readonly SDS_NETWORK_INTERFACES="eth0" 
-
-# OpenShift Only. For OCS or Rook/Ceph, you can set this to true and IO stats will be calculted of each RBD PVC that is used by each database on each worker node. For other SDS, set to false.
-readonly RBD_STATS=false
+# this array holds a list of the sds network interface/s (seperated by space) per worker (worker nodes might have different ethernet names).
+declare -A NODE_NETWORK_MAP=(
+[rack04-server1]="ens785f0 ens785f1"
+[rack04-server2]="ens785f0 ens785f1"
+[rack04-server3]="ens785f0 ens785f1"
+[rack04-server4]="ens785f2 ens785f3"
+[rack04-server5]="ens785f0 ens785f1"
+[rack04-server6]="ens785f0 ens785f1"
+[rack04-server7]="ens785f0 ens785f1"
+[rack04-server8]="ens785f2 ens785f3"
+[rack04-server9]="ens785f0 ens785f1"
+[rack04-server10]="ens785f0 ens785f1")
 
 # script related
 readonly DEBUG=false
 
 # in some cases nodes running the SDS will be tainted, sherlock will *try* to match the first taint and apply it to the stats pods
 readonly SDS_NODE_TAINTED=true
+
+# give a name for your storage solution so you can compare
+readonly STORAGE_VENDOR=my_storage_vendor
+
+# this variable sets whether the storage runs inside (part of) the K8s cluster or externally (options are internal/external). If internal, sherlock can collect stats on the storage devices that the internal SDS pods uses.
+readonly STORAGE_TYPE=external
 ```

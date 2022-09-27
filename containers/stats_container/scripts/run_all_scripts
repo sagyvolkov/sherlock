@@ -1,0 +1,82 @@
+#!/bin/bash
+
+set -m
+
+readonly INTERVAL=${1}
+readonly COUNT=${2}
+readonly NODE_TYPE=${3}
+
+function calculate_sds_converge_device_utilization()
+{
+  local file_name=${1}
+  for device_name in $(cat /tmp/sds_devices)
+  do
+      let r_s=0
+      let w_s=0
+      let util=0
+      let number_of_inputs=0
+      while read x
+      do
+        r_s=$(echo "$r_s + $(echo ${x}|awk -F, '{print $1}')"|bc)
+        w_s=$(echo "$w_s + $(echo ${x}|awk -F, '{print $2}')"|bc)
+        util=$(echo "$util + $(echo ${x}|awk -F, '{print $3}')"|bc)
+        let number_of_inputs++
+      done < <(grep ${device_name} ${file_name} | awk '{print $2","$8","$23}')
+      avg_r_s=$(echo "scale=2;$r_s/$number_of_inputs"|bc)
+      avg_w_s=$(echo "scale=2;$w_s/$number_of_inputs"|bc)
+      avg_util=$(echo "scale=2;$util/$number_of_inputs"|bc)
+      echo "SUMMARY: average internal SDS device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}"
+  done
+}
+
+function calculate_cpu_utilization()
+{
+  local file_name=${1}
+  let idle_avg_total=0
+  let total=0
+  let number_of_inputs=0
+  while read x
+  do
+    total=$(echo "$total + $x"|bc)
+    let number_of_inputs++
+  done < <(grep all ${file_name} |awk '{print $12}')
+  avg=$(echo "scale=2;100-($total/$number_of_inputs)"|bc)
+  echo "SUMMARY: CPU utilization: $avg"
+}
+
+function calculate_node_network_stats()
+{
+  local file_name=${1}
+  duration_in_seconds=$(echo "$(grep DATE.AFTER- /tmp/ifconfig.log | awk -FDATE.AFTER- '{print $2}')-$(grep DATE.BEFORE- /tmp/ifconfig.log | awk -FDATE.BEFORE- '{print $2}')" | bc)
+  for interface_name in $(cat /tmp/network_interfaces)
+  do
+    for net_stat_type in RX TX
+    do
+      bytes_before=$(grep BEFORE ${file_name} | grep -A7 IFCONFIG.BEFORE-${interface_name} | grep "${net_stat_type} packets" | awk '{print $6}')
+      bytes_after=$(grep AFTER ${file_name} | grep -A7 IFCONFIG.AFTER-${interface_name} | grep "${net_stat_type} packets" | awk '{print $6}')
+      total_bytes=$(echo "scale=2;(${bytes_after}-${bytes_before})/(1024^3)"|bc -l)
+      gb_per_seconds=$(echo "scale=2;${total_bytes}/${duration_in_seconds}"|bc -l)
+      echo "SUMMARY: ${interface_name} ${net_stat_type}: ${total_bytes}GB"
+      echo "SUMMARY: ${interface_name} ${net_stat_type}: ${gb_per_seconds}GB/s"
+    done
+  done
+}
+
+date +%s | sed 's:^:DATE.BEFORE-:' > /tmp/ifconfig.log 
+ifconfig | sed 's:^:IFCONFIG.BEFORE-:' >> /tmp/ifconfig.log 
+./run_iostat ${INTERVAL} ${COUNT} > /tmp/iostat.log 2>&1 &
+./run_mpstat ${INTERVAL} ${COUNT} > /tmp/mpstat.log 2>&1 &
+./run_vmstat ${INTERVAL} ${COUNT} > /tmp/vmstat.log 2>&1 &
+
+wait -n
+ifconfig | sed 's:^:IFCONFIG.AFTER-:' >> /tmp/ifconfig.log
+date +%s | sed 's:^:DATE.AFTER-:' >> /tmp/ifconfig.log 
+sleep 2
+cat /tmp/iostat.log | sed 's:^:IOSTAT-:'
+cat /tmp/mpstat.log | sed 's:^:MPSTAT-:'
+cat /tmp/vmstat.log | sed 's:^:VMSTAT-:'
+cat /tmp/ifconfig.log
+
+[[ "${NODE_TYPE}" == "sds" ]] && calculate_sds_converge_device_utilization /tmp/iostat.log
+calculate_node_network_stats /tmp/ifconfig.log
+calculate_cpu_utilization /tmp/mpstat.log

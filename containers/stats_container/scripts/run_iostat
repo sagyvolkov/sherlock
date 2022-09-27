@@ -3,4 +3,4 @@
 readonly INTERVAL=${1}
 readonly COUNT=${2}
 
-iostat -txm ${INTERVAL} ${COUNT}
+iostat -dtxmyz ${INTERVAL} ${COUNT}

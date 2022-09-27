@@ -1,7 +1,7 @@
 #!/bin/bash
 
-readonly KUBE_CMD=oc
-readonly SDS_TYPE=${1}
+readonly KUBE_CMD=kubectl
+readonly SDS_NAME=${1}
 readonly RWMIXWRITE=${2}
 readonly BLOCK_SIZE=${3}
 readonly FILE_NAME=${4}
@@ -9,18 +9,21 @@ readonly RUNTIME=${5}
 readonly JOBS=${6}
 readonly IODEPTH=${7}
 readonly WORKSIZE=${8}
-readonly DEVICE_TYPE=${9}
+readonly VOLUME_MODE=${9} # FS for file system or RAW for block.
 readonly DIRECT_IO=${10} # use direct=1 to do async without caches.
 readonly IO_PATTERN=${11} #readwrite for sequencial read/write, randrw for random read/write
 readonly FIO_POD_CPU=${12}
 readonly FIO_POD_MEM=${13}
-readonly TAG=${14}
+readonly FIO_OUTPUT_FORMAT=${14}
+readonly TAG=${15}
 readonly RUN_NAME="${RWMIXWRITE}rw-${BLOCK_SIZE}-rt${RUNTIME}-j${JOBS}-qd${IODEPTH}-${WORKSIZE}"
 readonly FIO_PER_WORKER=1
-readonly PVC_SIZE=20Gi
-readonly WORKERS_LIST_FILE=~/workers1
-readonly STORAGE_CLASS=ocs-storagecluster-ceph-rbd
+readonly PVC_SIZE=500Gi
+readonly WORKERS_LIST_FILE=<path to file holding all worker hostname>
+readonly STORAGE_CLASS=<your storage class>
+readonly NAMESPACE_NAME=fio
 readonly NUMBER_OF_WORKERS=3
+readonly STATS=false
 
 declare -A jobs_pods
 if [ "$(uname -s)" == "Linux" ];then
@@ -36,7 +39,8 @@ function mydate()
 
 function create_pvc()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  [[ "${VOLUME_MODE}" = "FS" ]] && volume_mode=Filesystem || volume_mode=Block
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -45,15 +49,16 @@ spec:
   storageClassName: ${STORAGE_CLASS}
   accessModes:
     - ReadWriteOnce
+  volumeMode: ${volume_mode}
   resources:
     requests:
       storage: ${PVC_SIZE}
 EOF
 }
 
-function run_fio_job()
+function run_fio_job_fs()
 {
-  job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
+  job_name=$(cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -66,11 +71,14 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/fio_container:0.4
+        - image: quay.io/sagyvolkov/fio_container:0.5
+          imagePullPolicy: Always
           name: ${fio_name}
           volumeMounts:
-            - name: ${SDS_TYPE}-pvc
+            - name: ${SDS_NAME}-pvc
               mountPath: ${FILE_NAME}
+          securityContext:
+            privileged: true
           resources:
             limits:
               memory: ${FIO_POD_MEM}
@@ -78,33 +86,151 @@ spec:
           command:
               - "bash"
               - "-c"
-              - ./run_fio ${RWMIXWRITE} ${BLOCK_SIZE} ${FILE_NAME} ${RUNTIME} ${JOBS} ${IODEPTH} ${WORKSIZE} ${DEVICE_TYPE} ${DIRECT_IO} ${IO_PATTERN}
+              - ./run_fio ${RWMIXWRITE} ${BLOCK_SIZE} ${FILE_NAME} ${RUNTIME} ${JOBS} ${IODEPTH} ${WORKSIZE} ${VOLUME_MODE} ${DIRECT_IO} ${IO_PATTERN} ${FIO_OUTPUT_FORMAT}
       volumes:
-        - name: ${SDS_TYPE}-pvc
+        - name: ${SDS_NAME}-pvc
           persistentVolumeClaim:
             claimName: ${pvc_name}
             readOnly: false
 EOF
 )
 job_name=$(echo ${job_name} | awk '{print $1}')
-fio_pod_name=$(${KUBE_CMD} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+fio_pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+}
+
+function run_fio_job_raw()
+{
+  job_name=$(cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: ${fio_name}-${node_name}-
+spec:
+  template:
+    spec:
+      hostNetwork: false
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+        - image: quay.io/sagyvolkov/fio_container:0.5
+          imagePullPolicy: Always
+          name: ${fio_name}
+          volumeDevices:
+            - name: ${SDS_NAME}-pvc
+              devicePath: /dev/${SDS}csi${RUN_NAME}
+          securityContext:
+            privileged: true
+          resources:
+            limits:
+              memory: ${FIO_POD_MEM}
+              cpu: ${FIO_POD_CPU}
+          command:
+              - "bash"
+              - "-c"
+              - ./run_fio ${RWMIXWRITE} ${BLOCK_SIZE} /dev/${SDS}csi${RUN_NAME} ${RUNTIME} ${JOBS} ${IODEPTH} ${WORKSIZE} ${VOLUME_MODE} ${DIRECT_IO} ${IO_PATTERN} ${FIO_OUTPUT_FORMAT}
+      volumes:
+        - name: ${SDS_NAME}-pvc
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+            readOnly: false
+EOF
+)
+job_name=$(echo ${job_name} | awk '{print $1}')
+fio_pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+}
+
+function find_taints()
+{
+ local node_name="${1}"
+ local node_taint=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.spec.taints[0].effect}{"ZZZ"}{.spec.taints[0].key}{"ZZZ"}{.spec.taints[0].value}')
+ if [[ ${node_taint} != "ZZZZZZ" ]];then
+   toleration_effect=$(echo "${node_taint}" | awk -F"ZZZ" '{print $1}')
+   toleration_key=$(echo "${node_taint}" | awk -F"ZZZ" '{print $2}')
+   toleration_value=$(echo "${node_taint}" | awk -F"ZZZ" '{print $3}')
+   if [[ "${toleration_value}" == "" ]]; then
+     toleration=$(echo -e "tolerations:\n      - key: \"${toleration_key}\"\n        operator: \"Exists\"\n        effect: ${toleration_effect}")
+   else
+     toleration=$(echo -e "tolerations:\n      - key: \"${toleration_key}\"\n        value: \"${toleration_value}\"\n        effect: ${toleration_effect}")
+   fi
+ fi
+
+ echo "${toleration}"
+}
+
+function run_stats()
+{
+  local toleration=""
+  local node_type="${1}"
+  if [[ "${SDS_NODE_TAINTED}" == "true" && "${node_type}" == "sds" ]]; then
+    echo "$(mydate) Checking for tolerations in sds node ${node_name}..."
+    toleration=$(find_taints ${node_name})
+  fi
+  local node_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: stats-${node_type}-${RUN_NAME}-node${node_number}-
+  namespace: ${NAMESPACE_NAME}
+spec:
+  template:
+    spec:
+      ${toleration}
+      hostNetwork: true
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: ${node_name}
+      containers:
+        - image: quay.io/sagyvolkov/stats-container:sherlock0.7
+          name: stats-${RUN_NAME}
+          resources:
+            limits:
+              memory: 64Mi
+              cpu: 0.1
+          command:
+              - "bash"
+              - "-c"
+              - echo "${SDS_NETWORK_INTERFACES}" > /tmp/sds_network_interfaces; echo "${SDS_DEVICES}" > /tmp/sds_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
+EOF
+)
+job_name=$(echo ${job_name} | awk '{print $1}')
+stats_pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+}
+
+function stats_collect()
+{
+  local node_type=${1}
+  shift 1
+  local local_array=("$@")
+  for node_number in ${!local_array[@]}
+  do
+    node_name=${local_array[${node_number}]}
+    echo "$(mydate) Starting to collect stats on ${node_type} node ${node_name}..."
+    run_stats "${node_type}" "${local_array[@]}"
+    jobs_pods[${job_name}]=${stats_pod_name}
+  done
 }
 
 function run_fio_job_parallel()
 {
   for ((j=1; j<=${FIO_PER_WORKER}*${NUMBER_OF_WORKERS}; j++))
   do
-    fio_name=fio-${SDS_TYPE}-${RUN_NAME}
+    fio_name=fio-${SDS_NAME}-${FIO_PER_WORKER}p-${RUN_NAME}
     node_number=$((j%NUMBER_OF_WORKERS))
-    pvc_name=${SDS_TYPE}-pvc-${j}
-    oc get pvc ${pvc_name} > /dev/null 2>&1
+    pvc_name=${SDS_NAME}-pvc-${j}
+    ${KUBE_CMD} -n ${NAMESPACE_NAME} get pvc ${pvc_name} > /dev/null 2>&1
     if [[ "${?}" == "1" ]];then
       create_pvc
     fi
     node_name=${worker_node_array[${node_number}]}
-    fio_pod_name=${SDS_TYPE}-${RUN_NAME}-${j}
+    fio_pod_name=${SDS_NAME}-${RUN_NAME}-${j}
     echo "$(mydate) Starting fio job ${job_name} for node ${node_name}"
-    run_fio_job
+    if [[ "${VOLUME_MODE}" == "FS" ]]; then
+      run_fio_job_fs
+    else
+      run_fio_job_raw
+    fi
     jobs_pods[${job_name}]=${fio_pod_name}
     echo "$(mydate) ${job_name} is using fio pod ${fio_pod_name}"
   done
@@ -115,16 +241,35 @@ function run_fio_job_parallel()
     job_list="${job_list} ${i}"
   done
   echo "$(mydate) Waiting for jobs to complete ..."
-  ${KUBE_CMD} wait --for=condition=complete ${job_list} --timeout=4000s
+  ${KUBE_CMD} -n ${NAMESPACE_NAME} wait --for=condition=complete ${job_list} --timeout=4000s
   echo "$(mydate) Getting logs from all jobs ..."
   for i in "${!jobs_pods[@]}"
   do
     fio_output=${jobs_pods[$i]}-${TAG}.log
-    ${KUBE_CMD} logs ${jobs_pods[$i]} > ${fio_output}
+    ${KUBE_CMD} -n ${NAMESPACE_NAME} logs ${jobs_pods[$i]} > ${fio_output}
     echo "$(mydate) ${i}"
     cat ${fio_output} | grep 'IOPS\|READ\|WRITE'
     echo ""
   done
 }
+
+if ! ${KUBE_CMD} get namespaces|grep -w ${NAMESPACE_NAME} > /dev/null; then
+  if [[ "${KUBE_CMD}" == "oc" ]]; then
+    ${KUBE_CMD} new-project ${NAMESPACE_NAME}
+    ${KUBE_CMD} adm policy add-scc-to-user privileged -z default -n ${NAMESPACE_NAME}
+  else
+    ${KUBE_CMD} create namespace ${NAMESPACE_NAME}
+  fi
+fi
+
+if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
+  [[ "${KUBE_CMD}" == "oc" ]] && oc adm policy add-scc-to-user hostnetwork -n${NAMESPACE_NAME} -z default
+  if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
+    [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+  else
+    stats_collect worker ${worker_node_array[@]}
+    [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+  fi
+fi
 
 run_fio_job_parallel
