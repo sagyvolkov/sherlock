@@ -1,9 +1,20 @@
 #!/bin/bash
 
+#!/bin/bash
+
 readonly TAG=${1}
+readonly NUMBER_OF_LOOPS=1
 
 for block in 4k 8k 64k 128k 1m
 do
-  bash run_fio_job ocs 30 ${block} /data 300 1 64 10g FS 1 randrw 1 4Gi ${TAG}
-  sleep 60
+  for write_perc in 0
+  do
+    for ((x=1;x<=NUMBER_OF_LOOPS;x++))
+    do
+      bash run_fio_job los ${write_perc} ${block} /data 60 4 4 2048g RAW 1 randrw 1 1Gi json ${TAG}-${x}
+      if [[ ${x} != ${NUMBER_OF_LOOPS} ]]; then
+        sleep 60
+      fi
+    done
+  done
 done

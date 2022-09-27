@@ -18,21 +18,34 @@ do
     esac
 done
 
+if [[ -z ${CONFIG_FILE} ]]; then
+  display_usage
+  exit 1
+fi
+
 [[ -z ${CONFIG_FILE} ]] && CONFIG_FILE=sherlock.config
 
 source ${CONFIG_FILE}
+
+kube_wait=""
+[[ "${WAIT_FOR_KUBE_CMD}" == "true" ]] && kube_wait="--wait=false"
 
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
   node_name=${worker_node_array[${node_number}]}
-  pvc_name=${DB_PVC_PREFIX}-${j}
   pod_name=${DB_POD_PREFIX}-${j}
   echo "$(mydate) Deleting deployment ${pod_name}..."
-  ${KUBE_CMD} delete deployment ${pod_name}
-  echo "$(mydate) Deleting PVC ${pvc_name}..."
-  ${KUBE_CMD} delete pvc ${pvc_name}
+  ${KUBE_CMD} -n ${NAMESPACE_NAME} delete deployment ${pod_name} ${kube_wait}
   echo "$(mydate) Deleting service ${pod_name}..."
-  ${KUBE_CMD} delete service ${pod_name}
+  ${KUBE_CMD} -n ${NAMESPACE_NAME} delete service ${pod_name} ${kube_wait}
 done
+
+for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
+do
+  pvc_name=${DB_PVC_PREFIX}-${j}
+  echo "$(mydate) Deleting PVC ${pvc_name}..."
+  ${KUBE_CMD} -n ${NAMESPACE_NAME} delete pvc ${pvc_name} ${kube_wait}
+done
+
 ${KUBE_CMD} delete namespace ${NAMESPACE_NAME}

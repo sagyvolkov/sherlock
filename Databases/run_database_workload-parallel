@@ -50,7 +50,7 @@ else
 fi
 
 declare -A jobs_pods
-declare -A worker_rbd
+declare -A worker_local_device
 
 
 if [ "$(uname -s)" == "Linux" ];then
@@ -73,34 +73,48 @@ else
 fi
 
 
-function get_rbd_list()
+function get_db_pvc_mapping()
 {
   declare -A pvc_array
-  for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
-  do
-    deployment_name=${DB_POD_PREFIX}-${j}
-    claim_name=$(${KUBE_CMD} get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.volumes[].persistentVolumeClaim.claimName}')
-    volume_name=$(${KUBE_CMD} get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
-    pvc_array[${j}]=${volume_name}
-  done
-  for node_name in $(cat $WORKERS_LIST_FILE)
-  do
-    local host_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
-    rbd_line=""
-    node_pvc=$(oc debug node/${node_name} -- lsblk | grep rbd | awk '{print $1"@@"$7}')
-    for lsblk_line in $(echo ${node_pvc})
+  if [[ "${STORAGE_VENDOR}" == "ceph" ]]; then
+    for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
     do
-      pvc="pvc-$(echo $lsblk_line | awk -F'@@' '{print $2}' | awk -F"pvc-" '{print $2}' | tr -d '/mount')"
-      for pvc_volume in ${pvc_array[@]}
-      do
-        if [[ "${pvc}" == "${pvc_volume}" ]]; then
-          rbd_line+=" $(echo $lsblk_line | awk -F'@@' '{print $1}')"
-        fi
-      done
+      deployment_name=${DB_POD_PREFIX}-${j}
+      claim_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.volumes[].persistentVolumeClaim.claimName}')
+      volume_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} get pvc ${claim_name} --no-headers -o custom-columns=":spec.volumeName")
+      pvc_array[${j}]=${volume_name}
     done
-    rbd_line=${rbd_line#?}
-    worker_rbd[${host_name}]=${rbd_line}
-  done
+    for node_name in $(cat $WORKERS_LIST_FILE)
+    do
+      local host_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+      rbd_line=""
+      node_pvc=$(oc debug node/${node_name} -- lsblk | grep rbd | awk '{print $1"@@"$7}')
+      for lsblk_line in $(echo ${node_pvc})
+      do
+        pvc="pvc-$(echo $lsblk_line | awk -F'@@' '{print $2}' | awk -F"pvc-" '{print $2}' | tr -d '/mount')"
+        for pvc_volume in ${pvc_array[@]}
+        do
+          if [[ "${pvc}" == "${pvc_volume}" ]]; then
+            rbd_line+=" $(echo $lsblk_line | awk -F'@@' '{print $1}')"
+          fi
+        done
+      done
+      rbd_line=${rbd_line#?}
+      worker_local_device[${host_name}]=${rbd_line}
+    done
+  fi
+  if [[ "${STORAGE_VENDOR}" == "lightbits" ]]; then
+    for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
+    do
+      deployment_name=${DB_POD_PREFIX}-${j}
+      deployment_data=$(${KUBE_CMD} -n ${NAMESPACE_NAME} get deployment ${deployment_name} -o jsonpath='{.spec.template.spec.containers[].volumeMounts[].mountPath}{","}{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}')
+      mount_point=$(echo ${deployment_data} | awk -F, '{print $1}')
+      k8s_hostname=$(echo ${deployment_data} | awk -F, '{print $2}')
+      pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} get pod -l app=${deployment_name} -o jsonpath="{.items[0].metadata.name}")
+      db_local_device=$(${KUBE_CMD} exec -n ${NAMESPACE_NAME} ${pod_name} -- /bin/bash -c "lsblk" | grep ${mount_point} | awk '{print $1}')
+      worker_local_device[${k8s_hostname}]+=" ${db_local_device}"
+    done
+  fi
 }
 
 function prepare_run_command()
@@ -144,6 +158,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   generateName: ${BENCHMARK_TOOL}-${JOB_TYPE}-${deployment_name}-${RUN_NAME}-
+  namespace: ${NAMESPACE_NAME}
 spec:
   template:
     spec:
@@ -157,6 +172,7 @@ spec:
           resources:
             limits:
               memory: ${BENCHMARK_POD_MEM_LIMIT}
+              cpu: ${BENCHMARK_POD_CPU_LIMIT}
           command:
                 - "bash"
                 - "-c"
@@ -165,7 +181,7 @@ spec:
 EOF
 )
 job_name=$(echo ${job_name} | awk '{print $1}')
-workload_pod_name=$(${KUBE_CMD} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+workload_pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
 }
 
 function find_taints()
@@ -188,6 +204,7 @@ function find_taints()
 
 function run_stats()
 {
+#        - image: quay.io/sagyvolkov/stats-container:sherlock0.5
   local toleration=""
   local node_type="${1}"
   if [[ "${SDS_NODE_TAINTED}" == "true" && "${node_type}" == "sds" ]]; then
@@ -195,11 +212,13 @@ function run_stats()
     toleration=$(find_taints ${node_name})
   fi  
   local node_name=$(${KUBE_CMD} get node ${node_name} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
+  network_interfaces="${NODE_NETWORK_MAP[${node_name}]}"
   job_name=$(cat <<EOF | ${KUBE_CMD} create -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: stats-${node_type}-${RUN_NAME}-node${node_number}-
+  generateName: stats-${node_type}-${RUN_NAME}-${node_name}-
+  namespace: ${NAMESPACE_NAME}
 spec:
   template:
     spec:
@@ -209,7 +228,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/stats-container:sherlock0.3
+        - image: quay.io/sagyvolkov/stats-container:sherlock0.7
           name: stats-${RUN_NAME}
           resources:
             limits:
@@ -218,11 +237,11 @@ spec:
           command:
               - "bash"
               - "-c"
-              - echo "${SDS_NETWORK_INTERFACES}" > /tmp/sds_network_interfaces; echo "${SDS_DEVICES}" > /tmp/sds_devices; ./run_all ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
+              - echo "${network_interfaces}" > /tmp/network_interfaces; echo "${SDS_DEVICES}" > /tmp/sds_devices; ./run_all_scripts ${STATS_INTERVAL} ${STATS_COUNT} ${node_type}
 EOF
 )
 job_name=$(echo ${job_name} | awk '{print $1}')
-stats_pod_name=$(${KUBE_CMD} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
+stats_pod_name=$(${KUBE_CMD} -n ${NAMESPACE_NAME} describe ${job_name} | grep "Created pod:" | awk -F "Created pod: " '{print $2}')
 }
 
 function stats_collect()
@@ -234,41 +253,46 @@ function stats_collect()
   do
     node_name=${local_array[${node_number}]}
     echo "$(mydate) Starting to collect stats on ${node_type} node ${node_name}..."
-    run_stats "${node_type}" "${local_array[@]}"
+    #run_stats "${node_type}" "${local_array[@]}"
+    run_stats "${node_type}"
     jobs_pods[${job_name}]=${stats_pod_name}
   done
 }
 
-function calculate_rbd_utilization()
+function calculate_local_device_utilization()
 {
   local file_name=${1}
-  local rbd_device="${2}"
-  for device_name in ${rbd_device}
+  local local_device="${2}"
+  for device_name in ${local_device}
   do
-      let r_s=0
-      let w_s=0
-      let util=0
-      let number_of_inputs=0
-      while read x
-      do
-        r_s=$(echo "$r_s + $(echo ${x}|awk -F, '{print $1}')"|bc)
-        w_s=$(echo "$w_s + $(echo ${x}|awk -F, '{print $2}')"|bc)
-        util=$(echo "$util + $(echo ${x}|awk -F, '{print $3}')"|bc)
-        let number_of_inputs++
-      done < <(grep ${device_name} ${file_name} | awk '{print $2","$8","$23}')
-      avg_r_s=$(echo "scale=2;$r_s/$number_of_inputs"|bc)
-      avg_w_s=$(echo "scale=2;$w_s/$number_of_inputs"|bc)
-      avg_util=$(echo "scale=2;$util/$number_of_inputs"|bc)
-      echo "NODE: ${node_ip}, AVERAGE RBD device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}" >> ${file_name}
+    correct_device="${device_name:0:5}c.${device_name:5}"
+    let r_s=0
+    let w_s=0
+    let util=0
+    let number_of_inputs=0
+    while read x
+    do
+      r_s=$(echo "$r_s + $(echo ${x}|awk -F, '{print $1}')"|bc)
+      w_s=$(echo "$w_s + $(echo ${x}|awk -F, '{print $2}')"|bc)
+      util=$(echo "$util + $(echo ${x}|awk -F, '{print $3}')"|bc)
+      let number_of_inputs++
+    done < <(grep ${correct_device} ${file_name} | awk '{print $2","$8","$23}')
+    avg_r_s=$(echo "scale=2;$r_s/$number_of_inputs"|bc)
+    avg_w_s=$(echo "scale=2;$w_s/$number_of_inputs"|bc)
+    avg_util=$(echo "scale=2;$util/$number_of_inputs"|bc)
+    echo "SUMMARY: ${node_name}, averages for local device ${device_name} read/s: ${avg_r_s}, write/s: ${avg_w_s}, utilization%: ${avg_util}" >> ${file_name}
   done
 }
+
 if [[ "${JOB_TYPE}" == "run" && "${STATS}" == "true" ]]; then
   [[ "${KUBE_CMD}" == "oc" ]] && oc adm policy add-scc-to-user hostnetwork -n${NAMESPACE_NAME} -z default
   if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
     [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
   else
     stats_collect worker ${worker_node_array[@]}
-    [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+    if [[ "${STORAGE_TYPE}" == "internal" ]]; then
+      [[ ${#sds_node_array[@]} -ne 0 ]] && stats_collect sds ${sds_node_array[@]}
+    fi
   fi
 fi
 
@@ -306,27 +330,28 @@ if [[ "${JOB_TYPE}" == "run" ]];then
     job_list="${job_list} ${i}"
   done
   echo "$(mydate) Waiting for jobs to complete ..."
-  ${KUBE_CMD} wait --for=condition=complete ${job_list} --timeout=4000s
+  ${KUBE_CMD} -n ${NAMESPACE_NAME} wait --for=condition=complete ${job_list} --timeout=4000s
 
   echo "$(mydate) All jobs are done, getting logs ..."
 
   for i in "${!jobs_pods[@]}"
   do
-    ${KUBE_CMD} logs ${jobs_pods[$i]} > ${RUN_NAME}/${jobs_pods[$i]}.log
+    ${KUBE_CMD} -n ${NAMESPACE_NAME} logs ${jobs_pods[$i]} > ${RUN_NAME}/${jobs_pods[$i]}.log
   done
 
-  if [[ "${STATS}" == "true" && "${RBD_STATS}" == "true" && "${KUBE_CMD}" == "oc" ]]; then
-    echo "$(mydate) Getting list of database RBDs from worker nodes and pods ..."
-    get_rbd_list
-    for node_ip in ${!worker_rbd[@]}
+  #if [[ "${STATS}" == "true" && "${PVC_STATS}" == "true" && "${KUBE_CMD}" == "oc" ]]; then
+  if [[ "${STATS}" == "true" && "${PVC_STATS}" == "true" ]]; then
+    echo "$(mydate) Generating list of database:PVC:PV:local device from worker nodes and pods ..."
+    get_db_pvc_mapping
+    for node_name in ${!worker_local_device[@]}
     do
       if [[ "${WORKERS_LIST_FILE}" == "${SDS_LIST_FILE}" ]]; then
-        file_name=$(ls ${RUN_NAME}/stats-sds-${RUN_NAME}-${node_ip}*.log)
+        file_name=$(ls ${RUN_NAME}/stats-sds-${RUN_NAME}-${node_name}*.log)
       else
-        file_name=$(ls ${RUN_NAME}/stats-worker-${RUN_NAME}-${node_ip}*.log)
+        file_name=$(ls ${RUN_NAME}/stats-worker-${RUN_NAME}-${node_name}*.log)
       fi
-      rbd_device="${worker_rbd[${node_ip}]}"
-      calculate_rbd_utilization ${file_name} "${rbd_device}"
+      local_device="${worker_local_device[${node_name}]}"
+      calculate_local_device_utilization ${file_name} "${local_device}"
     done
   fi
 else

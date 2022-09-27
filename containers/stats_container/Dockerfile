@@ -1,5 +1,5 @@
-FROM registry.fedoraproject.org/fedora-minimal:31
-RUN microdnf install sysstat procps bc net-tools vi && microdnf clean all
+FROM registry.fedoraproject.org/fedora-minimal:35
+RUN microdnf install -y sysstat procps bc net-tools iproute vi && microdnf clean all
 RUN mkdir /stats
 WORKDIR /stats
 ADD ./scripts ./

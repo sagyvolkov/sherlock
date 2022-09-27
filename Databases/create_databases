@@ -13,6 +13,11 @@ do
     esac
 done
 
+if [[ -z ${CONFIG_FILE} ]]; then
+  display_usage
+  exit 1
+fi
+    
 [[ -z ${CONFIG_FILE} ]] && CONFIG_FILE=sherlock.config
 
 source ${CONFIG_FILE}
@@ -60,7 +65,7 @@ function create_service()
       echo "Unknown database type..."
   esac
 
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -80,7 +85,7 @@ EOF
 
 function create_pvc()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -98,7 +103,7 @@ EOF
 
 function create_postgresql()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -125,7 +130,7 @@ spec:
       - name: ${pod_name}
         image: postgres:11.7
 #        args: ["-c", "max_connections=100" , "-c", "shared_buffers=4096MB"]
-        imagePullPolicy: "Always"
+        imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 5432
         volumeMounts:
@@ -156,7 +161,7 @@ EOF
 
 function create_mongodb()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -182,7 +187,7 @@ spec:
       containers:
       - name: ${pod_name}
         image: mongo:latest
-        imagePullPolicy: "Always"
+        imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 27017
         volumeMounts:
@@ -216,7 +221,7 @@ EOF
 
 function create_mysql_config_map()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -238,7 +243,7 @@ EOF
 
 function create_mongodb_config_map()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -261,7 +266,7 @@ EOF
 
 function create_mysql()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -287,7 +292,7 @@ spec:
       containers:
       - name: ${pod_name}
         image: mysql:8.0
-        imagePullPolicy: "Always"
+        imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 3306
         volumeMounts:
@@ -323,7 +328,7 @@ EOF
 
 function create_sqlserver()
 {
-  cat <<EOF | ${KUBE_CMD} create -f -
+  cat <<EOF | ${KUBE_CMD} -n ${NAMESPACE_NAME} create -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -350,7 +355,7 @@ spec:
       containers:
       - name: ${pod_name}
         image: mcr.microsoft.com/mssql/rhel/server:2019-latest
-        imagePullPolicy: "Always"
+        imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 1433
         volumeMounts:
@@ -385,21 +390,45 @@ function create_secret()
  oc create secret generic sqlserver --from-literal=SA_PASSWORD=${SA_PASSWORD} -n ${NAMESPACE_NAME}
 }
 
+function create_all_pvc()
+{
+  echo "$(mydate) Creating all PVCs first..."
+  for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
+  do
+    pvc_name=${DB_PVC_PREFIX}-${j}
+    echo "$(mydate) Creating PVC ${pvc_name}"
+    create_pvc
+  done
+}
+
+function wait_for_ready_pvc()
+{
+  echo "$(mydate) Checking that all PVCs are Bound..."
+  total_number_of_pod=$((DB_PER_WORKER * NUMBER_OF_WORKERS))
+  while [[ $(${KUBE_CMD} -n ${NAMESPACE_NAME} get pvc -o=jsonpath='{range .items[?(@.status.phase=="Bound")]}{.status.phase}' -o go-template='{{len .items}}') -ne ${total_number_of_pod} ]]
+  do
+    echo "$(mydate) Waiting for all PVCs to Bound..."
+    sleep 1
+  done
+}
+
 if ! ${KUBE_CMD} get namespaces|grep -w ${NAMESPACE_NAME} > /dev/null; then 
   if [[ "${KUBE_CMD}" == "oc" ]]; then
     ${KUBE_CMD} new-project ${NAMESPACE_NAME}
   else
-    ${KUBE_CMD} create new namespace ${NAMESPACE_NAME}
+    ${KUBE_CMD} create namespace ${NAMESPACE_NAME}
   fi
 fi
 
 if [[ "${DB_TYPE}" == "mysql" ]]; then
-  if [[ ! $(${KUBE_CMD} get configmap --no-headers -o custom-columns=:metadata.name) == "mysql-custom-config" ]]; then
+  if [[ ! $(${KUBE_CMD} -n ${NAMESPACE_NAME} get configmap --no-headers -o custom-columns=:metadata.name) == "mysql-custom-config" ]]; then
     echo "$(mydate) Creating MySQL configfile ..."
     create_mysql_config_map
   fi
-  echo "$(mydate) Making sure group scc is set for MySQL pods ..."
-  oc adm policy add-scc-to-group anyuid system:authenticated -n${NAMESPACE_NAME}
+  if [[ "${KUBE_CMD}" == "oc" ]]; then
+    echo "$(mydate) Making sure group scc is set for MySQL pods in Openshift..."
+    oc adm policy add-scc-to-group anyuid system:authenticated -n${NAMESPACE_NAME}
+  fi
 fi
 
 if [[ "${DB_TYPE}" == "sqlserver" ]]; then
@@ -410,14 +439,16 @@ if [[ "${DB_TYPE}" == "mongodb" ]]; then
   create_mongodb_config_map
 fi
 
+create_all_pvc
+wait_for_ready_pvc
+
 for ((j=0; j<=${DB_PER_WORKER}*${NUMBER_OF_WORKERS}-1; j++))
 do
   node_number=$((j%NUMBER_OF_WORKERS))
   node_name=$(${KUBE_CMD} get node ${worker_node_array[${node_number}]} -o jsonpath='{.metadata.labels.kubernetes\.io/hostname}')
-  pvc_name=${DB_PVC_PREFIX}-${j}
   pod_name=${DB_POD_PREFIX}-${j}
+  pvc_name=${DB_PVC_PREFIX}-${j}
   echo "$(mydate) Creating ${DB_TYPE} database pod ${pod_name} on node ${node_name}"
-  create_pvc
   case "${DB_TYPE}" in
     postgresql) 
       create_postgresql
@@ -438,5 +469,7 @@ do
     *)
       echo "Unknown database type..."
   esac
-  ${KUBE_CMD} wait --for=condition=Ready $(${KUBE_CMD} get pod -l app=${pod_name} -o name) --timeout=120s
+  if [[ "${WAIT_FOR_KUBE_CMD}" == "true" ]]; then
+    ${KUBE_CMD} -n ${NAMESPACE_NAME} wait --for=condition=Ready pod -l app=${pod_name} --timeout=120s
+  fi
 done
