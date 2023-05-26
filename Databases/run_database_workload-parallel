@@ -2,7 +2,7 @@
 
 function display_usage()
 {
-  echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c (config file) -n (run name)"
+  echo "Usage : $0 -b (benchmark tool) <sysbench, pgbench, ycsb or hammerdb> -j (job type) <prepare, run or cleanup(sysbench only)> -c (config file) -n (run name)"
 }
 
 function mydate()
@@ -166,7 +166,7 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: ${node_name}
       containers:
-        - image: quay.io/sagyvolkov/benchmark-container:sherlock0.5
+        - image: quay.io/sagyvolkov/benchmark-${BENCHMARK_TOOL}:0.1
           imagePullPolicy: Always
           name: ${BENCHMARK_TOOL}-${JOB_TYPE}
           resources:

@@ -1,0 +1,62 @@
+#!/bin/bash
+
+if [ $# -eq 0 ]; then
+ echo "Usage : $0 <init|workload_type>"
+ exit 1
+fi
+
+readonly ACTION=${1}
+readonly IP_ADDRESS=${2}
+readonly CLIENTS=${3}
+readonly THREADS=${4}
+readonly RUN_TYPE=${5}
+readonly RUN_TYPE_VAR=${6}
+readonly VACUUM=${7}
+readonly QUIET=${8}
+readonly SCALE=${9}
+readonly PSQL_USERNAME=${10}
+readonly PSQL_PASSWORD=${11}
+readonly PSQL_DB=${12}
+readonly PROGRESS=${13}
+readonly READ_ONLY=${14}
+readonly DEBUG=${15}
+
+[[ "${DEBUG}" == "true" ]] && echo $@
+
+export PGPASSWORD=${PSQL_PASSWORD}
+
+[[ "${VACUUM}" == "no" ]] && vacuum="-n" || vacuum=""
+
+function pgbench_init()
+{
+  [[ "${QUIET}" == "yes" ]] && quiet="-q" || quiet=""
+  /usr/pgsql-11/bin/pgbench -i -h ${IP_ADDRESS} -U ${PSQL_USERNAME} -s ${SCALE} ${quiet} ${PSQL_DB}
+  echo "END-PGBENCH-INIT"
+}
+
+function pgbench_run()
+{
+  [ "${RUN_TYPE}" == "time" ] && run_type="-T ${RUN_TYPE_VAR}" || run_type="-t ${RUN_TYPE_VAR}"
+  [ "${VACUUM}" == "yes" ] && vacuum="-v" || vacuum="-n"
+  case "${ACTION}" in
+  simple)   workload_type="-N"
+            ;;
+  90r10w)   workload_type="-f update.bench@3 -f read_branch.bench@2 -f read_account.bench@5"
+            ;;
+  70r30w)   workload_type="-f update.bench@1 -f read_branch.bench@2 -f read_account.bench@5"
+            ;;
+  readonly) workload_type="-S"
+            ;;
+  esac
+  /usr/pgsql-11/bin/pgbench -h ${IP_ADDRESS} -U ${PSQL_USERNAME} -c ${CLIENTS} -j ${THREADS} -P ${PROGRESS} ${run_type} ${workload_type} ${vacuum} ${PSQL_DB}
+  echo "END-PGBENCH-WORKLOAD"
+}
+
+case "${ACTION}" in
+prepare) echo "Initializing data ..."
+	  time pgbench_init
+	  ;;
+*) echo "Running pgbench ${ACTION} ..."
+	  time pgbench_run
+	  ;;
+esac
