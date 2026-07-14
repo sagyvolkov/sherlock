@@ -5,7 +5,7 @@ Converts a spec.sweep dict (where each value is a list) into a flat list of
 parameter dicts representing the cartesian product of all axes.
 
 This is the Python equivalent of the nested for-loops in the original
-sherlock bash scripts (run_loops, run_fio_tests, the SLOB script, etc.).
+sherlock bash scripts (run_loops, run_fio_tests, etc.).
 
 Example:
     sweep = {
