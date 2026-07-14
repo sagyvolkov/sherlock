@@ -1,0 +1,504 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sherlockhammerdbsuites.sherlock.io
+  annotations:
+    sherlock.io/description: "Parameter-sweep suite for HammerDB (MSSQL/MySQL)"
+spec:
+  group: sherlock.io
+  scope: Namespaced
+  names:
+    plural: sherlockhammerdbsuites
+    singular: sherlockhammerdbsuite
+    kind: SherlockHammerDBSuite
+    shortNames:
+      - slhdb
+      - slhammerdb
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runs
+          type: string
+          jsonPath: .status.summary.runsCompleted
+        - name: Failed
+          type: string
+          jsonPath: .status.summary.runsFailed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+
+            # ── spec ──────────────────────────────────────────────────────────
+            spec:
+              type: object
+              required: [database, execution, sweep, artifacts]
+              properties:
+
+                # ── database ────────────────────────────────────────────────
+                database:
+                  type: object
+                  required: [type, instancesPerNode, storageSize]
+                  properties:
+                    type:
+                      type: string
+                      enum: [mssql, mysql]
+                      description: >
+                        Database engine. HammerDB supports MSSQL (TPC-C) and MySQL (TPC-C).
+                    instancesPerNode:
+                      type: integer
+                      minimum: 1
+                      maximum: 8
+                      default: 1
+                      description: >
+                        Number of database pods per worker node. The operator spreads
+                        pods evenly using pod anti-affinity so no two pods of the same
+                        index land on the same node.
+                    storageClass:
+                      type: string
+                      default: ""
+                      description: >
+                        StorageClass for database PVCs. Empty string uses the cluster
+                        default. Any block or file storageClass works.
+                    storageSize:
+                      type: string
+                      pattern: '^[0-9]+[KMGT]i$'
+                      description: "PVC size per database instance, e.g. 100Gi"
+                    storagePlugin:
+                      type: string
+                      enum: [generic, lightbits, odf, portworx]
+                      default: generic
+                      description: >
+                        Controls which storage-side metric collection logic is used.
+                        'generic' collects iostat/vmstat from the nodes where DB pods
+                        run, with no storage-array knowledge. Other values activate
+                        plugin-specific collection (e.g. lbcli for lightbits).
+                    resources:
+                      type: object
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "2"
+                            memory:
+                              type: string
+                              default: "4Gi"
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "4"
+                            memory:
+                              type: string
+                              default: "8Gi"
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: >
+                        Optional label selector to constrain which nodes receive
+                        database pods. If omitted, all schedulable nodes are candidates.
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+                          tolerationSeconds:
+                            type: integer
+
+                # ── execution ───────────────────────────────────────────────
+                execution:
+                  type: object
+                  properties:
+                    order:
+                      type: string
+                      enum: [sequential, parallel]
+                      default: sequential
+                      description: >
+                        Whether sweep iterations run one at a time (sequential, matches
+                        the original shell script behaviour) or all at once (parallel).
+                        Parallel is faster but requires more cluster resources and makes
+                        storage contention harder to reason about.
+                    sleepBetweenRuns:
+                      type: integer
+                      minimum: 0
+                      default: 30
+                      description: >
+                        Seconds to wait between runs when order=sequential. Matches the
+                        SLEEP variable in the original sherlock shell scripts.
+                    failurePolicy:
+                      type: string
+                      enum: [abortAll, retryN, continueAndReport]
+                      default: abortAll
+                      description: >
+                        abortAll: cancel all remaining runs if any run fails.
+                        retryN: retry the failed run up to retryLimit times before
+                          considering it failed.
+                        continueAndReport: let remaining runs proceed, mark the suite
+                          Degraded at completion.
+                    retryLimit:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                      description: >
+                        Maximum retry attempts per run. Only used when
+                        failurePolicy=retryN.
+                    timeoutPerRun:
+                      type: string
+                      pattern: '^[0-9]+(m|h)$'
+                      default: "1h"
+                      description: >
+                        Maximum wall-clock time allowed for a single run before it is
+                        considered failed. Format: 30m, 2h, etc.
+
+                # ── sweep ───────────────────────────────────────────────────
+                sweep:
+                  type: object
+                  description: >
+                    Parameter sweep axes for HammerDB. Every field accepts a list of
+                    values. The operator takes the cartesian product of all multi-value
+                    fields to generate the run matrix. Single-value fields are fixed
+                    parameters that do not expand.
+                    Example: virtualUsers=[8,16] × testMins=[5,10] → 4 runs.
+                  required: [virtualUsers, warehouses, rampupMins, testMins]
+                  properties:
+                    virtualUsers:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 2048
+                      description: >
+                        HammerDB virtual user counts to sweep. Maps to 'vusers' in
+                        HammerDB TCL config. This is the primary scaling axis for
+                        TPC-C throughput tests.
+                      example: [8, 16, 32]
+                    warehouses:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                      description: >
+                        TPC-C warehouse count. Controls dataset size. Each warehouse
+                        is approximately 100MB. For a sweep that holds dataset size
+                        constant, use a single value: [100].
+                      example: [100]
+                    rampupMins:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 0
+                      description: >
+                        Warmup duration in minutes before measurement begins.
+                        Maps to 'rampup' in HammerDB TCL config.
+                      example: [2]
+                    testMins:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                      description: >
+                        Measurement window duration in minutes.
+                        Maps to 'duration' in HammerDB TCL config.
+                      example: [5, 10]
+                    allWarehouses:
+                      type: array
+                      items:
+                        type: boolean
+                      default: [false]
+                      description: >
+                        When true, virtual users operate across all warehouses rather
+                        than being pinned to a subset. Maps to 'allwarehouse' in
+                        HammerDB TCL config.
+
+                # ── artifacts ───────────────────────────────────────────────
+                artifacts:
+                  type: object
+                  required: [destination]
+                  properties:
+                    collectStats:
+                      type: boolean
+                      default: true
+                      description: >
+                        Whether to run stat collector pods (iostat, vmstat, ip/ifconfig)
+                        alongside benchmark jobs. Set false to run benchmark-only with
+                        no OS-level collection.
+                    compression:
+                      type: string
+                      enum: [gzip, zstd, none]
+                      default: gzip
+                      description: >
+                        Compression algorithm for artifact bundles. zstd is faster and
+                        compresses better; gzip is more universally available.
+                    destination:
+                      type: object
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum: [pvc, s3, local]
+                          description: >
+                            pvc: operator creates a PVC and writes bundles there.
+                              Survives pod restarts. Best for in-cluster access.
+                            s3: bundles streamed directly to S3-compatible object
+                              storage. No PVC required. Best for external archiving.
+                            local: bundles held in emptyDir on a collector pod.
+                              User retrieves with 'kubectl sherlock pull'. Best for
+                              laptop/workstation access.
+                        pvc:
+                          type: object
+                          description: "Required when type=pvc"
+                          properties:
+                            storageClass:
+                              type: string
+                              default: ""
+                              description: >
+                                StorageClass for the artifacts PVC. Does not need to
+                                match the database storageClass — any file or block
+                                class works. Empty = cluster default.
+                            size:
+                              type: string
+                              pattern: '^[0-9]+[KMGT]i$'
+                              default: "20Gi"
+                            accessMode:
+                              type: string
+                              enum: [ReadWriteOnce, ReadWriteMany]
+                              default: ReadWriteOnce
+                              description: >
+                                Use ReadWriteMany if you want to access the PVC from
+                                multiple pods simultaneously (e.g. for a results viewer).
+                        s3:
+                          type: object
+                          description: "Required when type=s3"
+                          properties:
+                            endpoint:
+                              type: string
+                              description: >
+                                S3-compatible endpoint URL. For AWS S3 use the regional
+                                endpoint, e.g. https://s3.us-east-1.amazonaws.com.
+                                For MinIO or Lightbits object storage use the internal
+                                service URL.
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                              default: "sherlock/{{.SuiteName}}/"
+                              description: >
+                                Path prefix within the bucket. Supports Go template
+                                variables: {{.SuiteName}}, {{.RunName}}, {{.Timestamp}}.
+                            credentialsSecret:
+                              type: string
+                              description: >
+                                Name of a k8s Secret in the same namespace containing
+                                keys 'access-key' and 'secret-key'.
+                            checksumVerification:
+                              type: boolean
+                              default: true
+                        local:
+                          type: object
+                          description: "Optional config when type=local"
+                          properties:
+                            ttlHours:
+                              type: integer
+                              minimum: 1
+                              maximum: 168
+                              default: 24
+                              description: >
+                                How many hours the collector pod (and its emptyDir)
+                                stays alive after the suite completes, waiting for
+                                the user to pull artifacts. After TTL the pod is
+                                deleted and artifacts are lost.
+                      # cross-field validation: type=pvc requires pvc block, etc.
+                      # enforced by a validating webhook (not expressible in OpenAPI v3)
+                    retention:
+                      type: object
+                      description: >
+                        Controls how long artifact bundles are kept. Only applies to
+                        pvc and s3 destinations; local is controlled by ttlHours.
+                      properties:
+                        keepLastN:
+                          type: integer
+                          minimum: 1
+                          description: >
+                            Keep only the N most recent bundles. When a new suite run
+                            adds a bundle that pushes the count over N, the oldest is
+                            deleted. Mutually exclusive with ttlDays (use one or both;
+                            whichever triggers first wins).
+                        ttlDays:
+                          type: integer
+                          minimum: 1
+                          description: >
+                            Delete bundles older than N days. The operator runs a
+                            cleanup reconcile daily.
+                        deleteWithSuite:
+                          type: boolean
+                          default: false
+                          description: >
+                            If true, deleting the SherlockHammerDBSuite CR also deletes
+                            the artifact PVC or S3 objects. Default false to prevent
+                            accidental data loss.
+
+            # ── status ────────────────────────────────────────────────────────
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending       # CR created, operator hasn't started yet
+                    - Deploying     # DB pods being created
+                    - Ready         # DB pods running, waiting for first run
+                    - Running       # a run is currently active
+                    - Sleeping      # between runs (sequential mode, sleepBetweenRuns)
+                    - Collecting    # run finished, collecting artifacts
+                    - Completed     # all runs done, all artifacts collected
+                    - Degraded      # completed with some failures (continueAndReport)
+                    - Failed        # aborted due to failure
+                observedGeneration:
+                  type: integer
+                  description: Generation of the spec this status reflects.
+                runMatrix:
+                  type: array
+                  description: >
+                    Expanded cartesian product of sweep axes. Populated by the operator
+                    when it first processes the Suite. Each entry is one SherlockRun.
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                        description: >
+                          Auto-generated name encoding the parameter values,
+                          e.g. "mssql-vu-sweep-vu16-wh100-rm2-tm5"
+                      params:
+                        type: object
+                        description: Resolved parameter values for this run.
+                        x-kubernetes-preserve-unknown-fields: true
+                      phase:
+                        type: string
+                        enum: [Pending, Running, Completed, Failed, Retrying]
+                      startTime:
+                        type: string
+                        format: date-time
+                      completionTime:
+                        type: string
+                        format: date-time
+                      retryCount:
+                        type: integer
+                        default: 0
+                      artifactPath:
+                        type: string
+                        description: >
+                          Path or S3 key where this run's bundle was written.
+                      result:
+                        type: object
+                        description: Parsed summary written by the Python stat parser.
+                        properties:
+                          nopm:
+                            type: number
+                            description: New Orders Per Minute (HammerDB primary metric)
+                          tpm:
+                            type: number
+                            description: Transactions Per Minute
+                          avgReadIops:
+                            type: number
+                          avgWriteIops:
+                            type: number
+                          avgReadBwMBs:
+                            type: number
+                          avgWriteBwMBs:
+                            type: number
+                          avgLatencyMs:
+                            type: number
+                          p95LatencyMs:
+                            type: number
+                          p99LatencyMs:
+                            type: number
+                summary:
+                  type: object
+                  description: Aggregate across all completed runs.
+                  properties:
+                    totalRuns:
+                      type: integer
+                    runsCompleted:
+                      type: integer
+                    runsFailed:
+                      type: integer
+                    runsRemaining:
+                      type: integer
+                    currentRunName:
+                      type: string
+                    estimatedCompletionTime:
+                      type: string
+                      format: date-time
+                artifacts:
+                  type: object
+                  properties:
+                    pvcName:
+                      type: string
+                    bundles:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          runName:
+                            type: string
+                          path:
+                            type: string
+                          sizeBytes:
+                            type: integer
+                          collectedAt:
+                            type: string
+                            format: date-time
+                conditions:
+                  type: array
+                  description: Standard k8s condition list for controller-manager compatibility.
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - DatabaseReady
+                          - SweepRunning
+                          - ArtifactsAvailable
+                          - Failed
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

@@ -1,0 +1,35 @@
+# YCSB workload sweep on MongoDB
+# threads × workload = 3 × 3 = 9 runs
+# Local destination — pull with: kubectl sherlock pull mongo-workload-sweep ./results/
+---
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockYCSBSuite
+metadata:
+  name: mongo-workload-sweep
+  namespace: sherlock
+spec:
+  database:
+    type: mongodb
+    instancesPerNode: 1
+    storageClass: fast-nvme
+    storageSize: 100Gi
+    storagePlugin: generic
+  execution:
+    order: sequential
+    sleepBetweenRuns: 30
+    failurePolicy: abortAll
+    timeoutPerRun: 1h
+  sweep:
+    threads:             [4, 8, 16]
+    workload:            [a, b, c]
+    recordCount:         [1000000]
+    operationCount:      [100000]
+    requestDistribution: [zipfian]
+    maxExecutionTime:    120
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: local
+      local:
+        ttlHours: 48

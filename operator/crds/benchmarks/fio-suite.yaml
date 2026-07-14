@@ -1,0 +1,569 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sherlockfiosuites.sherlock.io
+  annotations:
+    sherlock.io/description: "Parameter-sweep suite for fio (storage I/O benchmark, any volume type)"
+spec:
+  group: sherlock.io
+  scope: Namespaced
+  names:
+    plural: sherlockfiosuites
+    singular: sherlockfiosuite
+    kind: SherlockFioSuite
+    shortNames:
+      - slfio
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runs
+          type: string
+          jsonPath: .status.summary.runsCompleted
+        - name: Failed
+          type: string
+          jsonPath: .status.summary.runsFailed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+
+            spec:
+              type: object
+              required: [storage, execution, sweep, artifacts]
+              properties:
+
+                # ── storage ─────────────────────────────────────────────────
+                # fio is a pure storage benchmark — there is no database layer.
+                # The storage section replaces the database section used by the
+                # DB benchmark CRDs. It describes the PVCs fio will exercise.
+                storage:
+                  type: object
+                  required: [storageSize, volumeMode]
+                  properties:
+                    storageClass:
+                      type: string
+                      default: ""
+                      description: >
+                        StorageClass for fio PVCs. Empty = cluster default.
+                        Any block or filesystem StorageClass works. For raw
+                        block testing set volumeMode=Block and ensure your
+                        StorageClass supports volumeBindingMode: WaitForFirstConsumer.
+                    storageSize:
+                      type: string
+                      pattern: '^[0-9]+[KMGT]i$'
+                      description: >
+                        PVC size per fio worker. Should be larger than workSize
+                        to avoid fio running out of space. E.g. if workSize=100Gi
+                        use at least 110Gi here.
+                    storagePlugin:
+                      type: string
+                      enum: [generic, lightbits, odf, portworx]
+                      default: generic
+                      description: >
+                        Controls storage-side metric collection. 'generic' uses
+                        iostat/vmstat on the nodes where fio pods run. Other values
+                        activate plugin-specific collection alongside generic stats.
+                    volumeMode:
+                      type: string
+                      enum: [Filesystem, Block]
+                      default: Filesystem
+                      description: >
+                        Filesystem: fio uses --directory, PVC mounted as a directory.
+                          Use for NFS, CephFS, or any file-based storage class.
+                        Block: fio uses --filename pointing to the raw block device.
+                          Use for block storage (iSCSI, NVMe-oF, Ceph RBD, etc.)
+                          Requires the StorageClass to support volumeMode: Block.
+                          Maps to VOLUME_MODE=RAW in the original sherlock scripts.
+                    fioPerWorker:
+                      type: integer
+                      minimum: 1
+                      maximum: 16
+                      default: 1
+                      description: >
+                        Number of fio jobs (and PVCs) per worker node. Each job
+                        gets its own PVC. Total PVCs = fioPerWorker × workerCount.
+                        Maps to FIO_PER_WORKER in the original scripts.
+                    workerCount:
+                      type: integer
+                      minimum: 1
+                      description: >
+                        Number of worker nodes to run fio on. The operator selects
+                        nodes using nodeSelector (if set) or all schedulable workers.
+                        Maps to NUMBER_OF_WORKERS in the original scripts.
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: >
+                        Optional label selector to constrain which nodes receive
+                        fio pods. If omitted, all schedulable worker nodes are used.
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+                    resources:
+                      type: object
+                      description: "CPU/memory for each fio pod"
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "1"
+                            memory:
+                              type: string
+                              default: "1Gi"
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "4"
+                            memory:
+                              type: string
+                              default: "2Gi"
+
+                # ── execution ───────────────────────────────────────────────
+                execution:
+                  type: object
+                  properties:
+                    order:
+                      type: string
+                      enum: [sequential, parallel]
+                      default: sequential
+                      description: >
+                        sequential: one parameter combination at a time. Recommended
+                          for storage benchmarking to avoid interference between runs.
+                        parallel: all combinations run simultaneously. Only useful
+                          when you intentionally want to measure contention.
+                    sleepBetweenRuns:
+                      type: integer
+                      minimum: 0
+                      default: 60
+                      description: >
+                        Seconds to wait between runs when order=sequential.
+                        fio benefits from a longer sleep than DB benchmarks to allow
+                        storage caches to drain. Default 60s (vs 30s for DB suites).
+                    failurePolicy:
+                      type: string
+                      enum: [abortAll, retryN, continueAndReport]
+                      default: abortAll
+                    retryLimit:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                    timeoutPerRun:
+                      type: string
+                      pattern: '^[0-9]+(m|h)$'
+                      default: "2h"
+                      description: >
+                        Maximum wall-clock time per run. Should be significantly longer
+                        than runtime × jobs to account for PVC provisioning time and
+                        fio warmup. Default 2h.
+
+                # ── sweep ───────────────────────────────────────────────────
+                sweep:
+                  type: object
+                  required: [blockSize, rwMixWrite, ioPattern, runtime, jobs, ioDepth, workSize]
+                  description: >
+                    fio-specific sweep axes. Every field accepts a list of values;
+                    the operator expands the cartesian product into individual runs.
+
+                    Direct mapping to fio CLI flags and original sherlock script params:
+                      blockSize   → fio --bs          (BLOCK_SIZE in original)
+                      rwMixWrite  → fio --rwmixwrite   (RWMIXWRITE in original)
+                      ioPattern   → fio --readwrite    (IO_PATTERN in original)
+                      runtime     → fio --runtime      (RUNTIME in original)
+                      jobs        → fio --numjobs      (JOBS in original)
+                      ioDepth     → fio --iodepth      (IODEPTH in original)
+                      workSize    → fio --filesize      (WORKSIZE in original)
+                      directIO    → fio --direct        (DIRECT_IO in original)
+
+                    The original run_fio_tests script swept blockSize across
+                    [4k, 8k, 64k, 128k, 1m] with a fixed rwMixWrite=0 (read-only).
+                    This CRD makes all of those axes explicit and sweepable.
+                  properties:
+                    blockSize:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        pattern: '^[0-9]+(k|m|g|K|M|G)$'
+                      description: >
+                        fio --bs: I/O block size. Sweep this axis to characterize
+                        storage performance across different transfer sizes.
+                        Common values: 4k (IOPS-bound), 128k/1m (bandwidth-bound).
+                      example: ["4k", "8k", "64k", "128k", "1m"]
+                    rwMixWrite:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 0
+                        maximum: 100
+                      description: >
+                        fio --rwmixwrite: percentage of I/O that is writes (0–100).
+                        0 = read-only, 100 = write-only, 30 = 70% read / 30% write.
+                        Only meaningful when ioPattern includes both reads and writes
+                        (readwrite or randrw). Ignored for read-only/write-only patterns.
+                      example: [0, 30, 50, 100]
+                    ioPattern:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        enum:
+                          - read          # sequential read
+                          - write         # sequential write
+                          - readwrite     # sequential mixed read/write
+                          - randread      # random read
+                          - randwrite     # random write
+                          - randrw        # random mixed read/write
+                          - trimwrite     # sequential trim+write (for SSDs/NVMe)
+                      description: >
+                        fio --readwrite: I/O access pattern.
+                        Maps to IO_PATTERN in the original scripts.
+                        Use randrw for OLTP-like workloads, read/write for
+                        sequential throughput (backup/restore, streaming).
+                      example: ["randrw", "read", "write"]
+                    runtime:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 10
+                      description: >
+                        fio --runtime: test duration in seconds. fio uses
+                        --time_based so it runs exactly this long regardless of
+                        how much data is written.
+                      example: [60, 120]
+                    jobs:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 256
+                      description: >
+                        fio --numjobs: number of parallel fio threads per pod.
+                        Each thread gets its own file/device slice. Total I/O
+                        concurrency per node = jobs × fioPerWorker.
+                      example: [4]
+                    ioDepth:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 1024
+                      description: >
+                        fio --iodepth: number of I/Os to keep in flight per job.
+                        Critical for NVMe and high-performance block storage where
+                        latency hides behind queue depth. Sweep this to find the
+                        saturation point of your storage.
+                      example: [4]
+                    workSize:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        pattern: '^[0-9]+(k|m|g|t|K|M|G|T)i?$'
+                      description: >
+                        fio --filesize: size of the test file/device per job.
+                        Should be large enough to exceed storage cache capacity.
+                        For production characterization use at least 2× available
+                        DRAM on the storage nodes.
+                      example: ["2048g"]
+                    directIO:
+                      type: array
+                      items:
+                        type: integer
+                        enum: [0, 1]
+                      default: [1]
+                      description: >
+                        fio --direct: bypass OS page cache (1=direct, 0=buffered).
+                        Always use 1 for storage benchmarking — buffered I/O measures
+                        the OS cache, not the storage. Use 0 only to measure caching
+                        behaviour intentionally.
+                        Maps to DIRECT_IO in the original scripts.
+                    groupReporting:
+                      type: boolean
+                      default: true
+                      description: >
+                        fio --group_reporting: aggregate stats across all jobs in a
+                        single report rather than per-job output. Matches the original
+                        sherlock fio container behaviour. Not a sweep axis.
+                    outputFormat:
+                      type: string
+                      enum: [normal, json, json+, terse]
+                      default: json
+                      description: >
+                        fio --output-format: output format for fio results.
+                        json enables the Python stat parser to extract structured
+                        metrics. normal is human-readable but harder to parse.
+                        The original scripts used 'normal'; v2 defaults to 'json'
+                        for better operator integration. Not a sweep axis.
+
+                # ── artifacts ───────────────────────────────────────────────
+                artifacts:
+                  type: object
+                  required: [destination]
+                  properties:
+                    collectStats:
+                      type: boolean
+                      default: true
+                      description: >
+                        Whether to run stat collector pods (iostat, vmstat, ip)
+                        alongside fio jobs. For fio specifically this is doubly
+                        useful since fio itself generates I/O that the stat
+                        collectors can observe at the OS level in parallel.
+                    compression:
+                      type: string
+                      enum: [gzip, zstd, none]
+                      default: gzip
+                    destination:
+                      type: object
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum: [pvc, s3, local]
+                        pvc:
+                          type: object
+                          properties:
+                            storageClass:
+                              type: string
+                              default: ""
+                            size:
+                              type: string
+                              pattern: '^[0-9]+[KMGT]i$'
+                              default: "20Gi"
+                            accessMode:
+                              type: string
+                              enum: [ReadWriteOnce, ReadWriteMany]
+                              default: ReadWriteOnce
+                        s3:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                              default: "sherlock/{{.SuiteName}}/"
+                            credentialsSecret:
+                              type: string
+                            checksumVerification:
+                              type: boolean
+                              default: true
+                        local:
+                          type: object
+                          properties:
+                            ttlHours:
+                              type: integer
+                              minimum: 1
+                              maximum: 168
+                              default: 24
+                    retention:
+                      type: object
+                      properties:
+                        keepLastN:
+                          type: integer
+                          minimum: 1
+                        ttlDays:
+                          type: integer
+                          minimum: 1
+                        deleteWithSuite:
+                          type: boolean
+                          default: false
+
+            # ── status ────────────────────────────────────────────────────────
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Provisioning, Ready, Running, Sleeping,
+                         Collecting, Completed, Degraded, Failed]
+                  description: >
+                    fio adds a 'Provisioning' phase (between Pending and Ready)
+                    because PVC provisioning for block storage can take significant
+                    time, especially with large storageSize values.
+                observedGeneration:
+                  type: integer
+                runMatrix:
+                  type: array
+                  description: >
+                    Expanded cartesian product of sweep axes. Each entry is one fio run.
+                    Run names encode the swept parameters, e.g.:
+                    "nvme-sweep-bs4k-rw0-randrw-rt60-j4-qd4-2048g"
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      params:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      phase:
+                        type: string
+                        enum: [Pending, Running, Completed, Failed, Retrying]
+                      startTime:
+                        type: string
+                        format: date-time
+                      completionTime:
+                        type: string
+                        format: date-time
+                      retryCount:
+                        type: integer
+                        default: 0
+                      artifactPath:
+                        type: string
+                      result:
+                        type: object
+                        description: >
+                          Parsed from fio JSON output (--output-format=json).
+                          All IOPS and bandwidth values are aggregates across all
+                          jobs and all workers (group_reporting=true).
+                        properties:
+                          # Read metrics
+                          readIops:
+                            type: number
+                            description: "Aggregate read IOPS across all jobs/workers"
+                          readBwMBs:
+                            type: number
+                            description: "Aggregate read bandwidth in MB/s"
+                          readLatAvgUs:
+                            type: number
+                            description: "Average read completion latency in microseconds"
+                          readLatP50Us:
+                            type: number
+                          readLatP95Us:
+                            type: number
+                          readLatP99Us:
+                            type: number
+                          readLatP999Us:
+                            type: number
+                            description: "p99.9 — important for NVMe-oF tail latency"
+                          # Write metrics
+                          writeIops:
+                            type: number
+                            description: "Aggregate write IOPS across all jobs/workers"
+                          writeBwMBs:
+                            type: number
+                          writeLatAvgUs:
+                            type: number
+                          writeLatP50Us:
+                            type: number
+                          writeLatP95Us:
+                            type: number
+                          writeLatP99Us:
+                            type: number
+                          writeLatP999Us:
+                            type: number
+                          # Combined / derived
+                          totalIops:
+                            type: number
+                            description: "readIops + writeIops"
+                          totalBwMBs:
+                            type: number
+                            description: "readBwMBs + writeBwMBs"
+                          # OS-level metrics from stat collectors
+                          # (same fields as DB benchmarks for cross-suite comparison)
+                          avgReadIops:
+                            type: number
+                            description: "iostat read IOPS from stat collector pods"
+                          avgWriteIops:
+                            type: number
+                          avgReadBwMBs:
+                            type: number
+                          avgWriteBwMBs:
+                            type: number
+                          avgLatencyMs:
+                            type: number
+                          p95LatencyMs:
+                            type: number
+                          p99LatencyMs:
+                            type: number
+                summary:
+                  type: object
+                  properties:
+                    totalRuns:
+                      type: integer
+                    runsCompleted:
+                      type: integer
+                    runsFailed:
+                      type: integer
+                    runsRemaining:
+                      type: integer
+                    currentRunName:
+                      type: string
+                    totalPvcsProvisioned:
+                      type: integer
+                      description: "fio-specific: tracks PVC count across all workers"
+                artifacts:
+                  type: object
+                  properties:
+                    pvcName:
+                      type: string
+                    bundles:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          runName:
+                            type: string
+                          path:
+                            type: string
+                          sizeBytes:
+                            type: integer
+                          collectedAt:
+                            type: string
+                            format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum: [PVCsReady, SweepRunning, ArtifactsAvailable, Failed]
+                        description: >
+                          fio uses 'PVCsReady' instead of 'DatabaseReady' since
+                          there is no database layer to wait for.
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

@@ -1,0 +1,109 @@
+# Example: fio block-size sweep on NVMe-oF block volumes
+# Replicates the original run_fio_tests script pattern:
+#   blockSize swept across [4k, 8k, 64k, 128k, 1m]
+#   with read-only workload (rwMixWrite=0, ioPattern=randread)
+# Plus adds a write-heavy sweep axis: rwMixWrite=[0, 30, 100]
+# Total: 5 × 3 = 15 runs, sequential with 60s sleep between runs
+#
+# Run names will be:
+#   nvme-bs-sweep-bs4k-rw0-randread-rt60-j4-qd4-2048g
+#   nvme-bs-sweep-bs4k-rw30-randrw-rt60-j4-qd4-2048g
+#   ... (15 total)
+---
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockFioSuite
+metadata:
+  name: nvme-bs-sweep
+  namespace: sherlock
+spec:
+  storage:
+    storageClass: lightbits-nvmeof
+    storageSize: 2200Gi          # larger than workSize (2048g) to avoid ENOSPC
+    storagePlugin: lightbits
+    volumeMode: Block            # raw block — NVMe-oF best practice
+    fioPerWorker: 1
+    workerCount: 3
+    nodeSelector:
+      node-role: worker
+    resources:
+      requests: {cpu: "2", memory: "1Gi"}
+      limits:   {cpu: "4", memory: "2Gi"}
+
+  execution:
+    order: sequential
+    sleepBetweenRuns: 60         # longer sleep for block storage cache drain
+    failurePolicy: abortAll
+    timeoutPerRun: 2h
+
+  sweep:
+    blockSize:   ["4k", "8k", "64k", "128k", "1m"]   # primary axis: block size
+    rwMixWrite:  [0, 30, 100]                          # secondary axis: rw mix
+    ioPattern:   [randrw]                              # fixed: random mixed
+    runtime:     [60]
+    jobs:        [4]
+    ioDepth:     [4]
+    workSize:    ["2048g"]
+    directIO:    [1]
+    groupReporting: true
+    outputFormat: json
+
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: pvc
+      pvc:
+        storageClass: ""          # use cluster default for artifacts PVC
+        size: 20Gi
+    retention:
+      keepLastN: 20
+      deleteWithSuite: false
+
+---
+# Example 2: fio filesystem mode sweep (NFS or CephFS)
+# Sequential read/write throughput — classic backup/restore characterization
+# blockSize × ioPattern = 3 × 2 = 6 runs
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockFioSuite
+metadata:
+  name: nfs-throughput-sweep
+  namespace: sherlock
+spec:
+  storage:
+    storageClass: nfs-csi
+    storageSize: 110Gi
+    storagePlugin: generic
+    volumeMode: Filesystem       # file mode — directory mount
+    fioPerWorker: 1
+    workerCount: 3
+
+  execution:
+    order: sequential
+    sleepBetweenRuns: 30
+    failurePolicy: continueAndReport
+    timeoutPerRun: 1h
+
+  sweep:
+    blockSize:  ["128k", "512k", "1m"]   # large blocks for throughput
+    rwMixWrite: [0]                       # read-only for throughput baseline
+    ioPattern:  [read, write]             # sequential read AND write
+    runtime:    [120]
+    jobs:       [4]
+    ioDepth:    [4]
+    workSize:   ["100g"]
+    directIO:   [1]
+    outputFormat: json
+
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: s3
+      s3:
+        endpoint: https://minio.internal.example.com
+        bucket: sherlock-fio-results
+        prefix: "runs/{{.SuiteName}}/{{.Timestamp}}/"
+        credentialsSecret: sherlock-s3-creds
+    retention:
+      ttlDays: 60
+      deleteWithSuite: false

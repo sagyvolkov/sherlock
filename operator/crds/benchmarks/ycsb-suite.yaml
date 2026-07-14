@@ -1,0 +1,381 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sherlockycsbbenchsuites.sherlock.io
+  annotations:
+    sherlock.io/description: "Parameter-sweep suite for YCSB (MongoDB)"
+spec:
+  group: sherlock.io
+  scope: Namespaced
+  names:
+    plural: sherlockycsbbenchsuites
+    singular: sherlockycsbbenchsuite
+    kind: SherlockYCSBSuite
+    shortNames:
+      - slycsb
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runs
+          type: string
+          jsonPath: .status.summary.runsCompleted
+        - name: Failed
+          type: string
+          jsonPath: .status.summary.runsFailed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [database, execution, sweep, artifacts]
+              properties:
+
+                database:
+                  type: object
+                  required: [instancesPerNode, storageSize]
+                  properties:
+                    type:
+                      type: string
+                      enum: [mongodb]
+                      default: mongodb
+                    instancesPerNode:
+                      type: integer
+                      minimum: 1
+                      maximum: 8
+                      default: 1
+                    storageClass:
+                      type: string
+                      default: ""
+                    storageSize:
+                      type: string
+                      pattern: '^[0-9]+[KMGT]i$'
+                    storagePlugin:
+                      type: string
+                      enum: [generic, lightbits, odf, portworx]
+                      default: generic
+                    resources:
+                      type: object
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "2"
+                            memory:
+                              type: string
+                              default: "4Gi"
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "4"
+                            memory:
+                              type: string
+                              default: "8Gi"
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+
+                execution:
+                  type: object
+                  properties:
+                    order:
+                      type: string
+                      enum: [sequential, parallel]
+                      default: sequential
+                    sleepBetweenRuns:
+                      type: integer
+                      minimum: 0
+                      default: 30
+                    failurePolicy:
+                      type: string
+                      enum: [abortAll, retryN, continueAndReport]
+                      default: abortAll
+                    retryLimit:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                    timeoutPerRun:
+                      type: string
+                      pattern: '^[0-9]+(m|h)$'
+                      default: "1h"
+
+                sweep:
+                  type: object
+                  required: [threads, workload, recordCount, operationCount]
+                  description: >
+                    YCSB-specific sweep axes.
+                    workload maps to the YCSB built-in workloads:
+                      a: 50% read / 50% update
+                      b: 95% read /  5% update
+                      c: 100% read
+                      d: 95% read /  5% insert (latest distribution)
+                      e: 95% scan  /  5% insert
+                      f: 50% read  / 50% read-modify-write
+                    These are the standard YCSB workload letters used in research.
+                  properties:
+                    threads:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 1024
+                      description: "YCSB -threads: concurrent client threads"
+                      example: [4, 8, 16]
+                    workload:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        enum: [a, b, c, d, e, f]
+                      description: "YCSB workload letter — defines read/write/scan mix"
+                      example: [a, b, c]
+                    recordCount:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1000
+                      description: "YCSB -p recordcount: number of records in the dataset"
+                      example: [1000000]
+                    operationCount:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1000
+                      description: "YCSB -p operationcount: number of operations to execute per run"
+                      example: [100000]
+                    requestDistribution:
+                      type: array
+                      items:
+                        type: string
+                        enum: [uniform, zipfian, hotspot, sequential, exponential, latest]
+                      default: [uniform]
+                      description: >
+                        YCSB -p requestdistribution: how keys are selected.
+                        zipfian models real-world skewed access patterns (hot keys).
+                        uniform is the default and most reproducible.
+                    maxExecutionTime:
+                      type: integer
+                      minimum: 10
+                      default: 120
+                      description: >
+                        YCSB -p maxexecutiontime: cap run duration in seconds regardless
+                        of operationCount. Not a sweep axis — single integer.
+
+                artifacts:
+                  type: object
+                  required: [destination]
+                  properties:
+                    collectStats:
+                      type: boolean
+                      default: true
+                    compression:
+                      type: string
+                      enum: [gzip, zstd, none]
+                      default: gzip
+                    destination:
+                      type: object
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum: [pvc, s3, local]
+                        pvc:
+                          type: object
+                          properties:
+                            storageClass:
+                              type: string
+                              default: ""
+                            size:
+                              type: string
+                              pattern: '^[0-9]+[KMGT]i$'
+                              default: "20Gi"
+                            accessMode:
+                              type: string
+                              enum: [ReadWriteOnce, ReadWriteMany]
+                              default: ReadWriteOnce
+                        s3:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                              default: "sherlock/{{.SuiteName}}/"
+                            credentialsSecret:
+                              type: string
+                            checksumVerification:
+                              type: boolean
+                              default: true
+                        local:
+                          type: object
+                          properties:
+                            ttlHours:
+                              type: integer
+                              minimum: 1
+                              maximum: 168
+                              default: 24
+                    retention:
+                      type: object
+                      properties:
+                        keepLastN:
+                          type: integer
+                          minimum: 1
+                        ttlDays:
+                          type: integer
+                          minimum: 1
+                        deleteWithSuite:
+                          type: boolean
+                          default: false
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Deploying, Ready, Running, Sleeping,
+                         Collecting, Completed, Degraded, Failed]
+                observedGeneration:
+                  type: integer
+                runMatrix:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      params:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      phase:
+                        type: string
+                        enum: [Pending, Running, Completed, Failed, Retrying]
+                      startTime:
+                        type: string
+                        format: date-time
+                      completionTime:
+                        type: string
+                        format: date-time
+                      retryCount:
+                        type: integer
+                        default: 0
+                      artifactPath:
+                        type: string
+                      result:
+                        type: object
+                        properties:
+                          throughputOpsPerSec:
+                            type: number
+                            description: YCSB primary metric — overall ops/sec
+                          readLatencyAvgUs:
+                            type: number
+                            description: Average read latency in microseconds (YCSB native unit)
+                          readLatencyP95Us:
+                            type: number
+                          readLatencyP99Us:
+                            type: number
+                          updateLatencyAvgUs:
+                            type: number
+                          updateLatencyP95Us:
+                            type: number
+                          avgReadIops:
+                            type: number
+                          avgWriteIops:
+                            type: number
+                          avgReadBwMBs:
+                            type: number
+                          avgWriteBwMBs:
+                            type: number
+                          avgLatencyMs:
+                            type: number
+                          p95LatencyMs:
+                            type: number
+                          p99LatencyMs:
+                            type: number
+                summary:
+                  type: object
+                  properties:
+                    totalRuns:
+                      type: integer
+                    runsCompleted:
+                      type: integer
+                    runsFailed:
+                      type: integer
+                    runsRemaining:
+                      type: integer
+                    currentRunName:
+                      type: string
+                artifacts:
+                  type: object
+                  properties:
+                    pvcName:
+                      type: string
+                    bundles:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          runName:
+                            type: string
+                          path:
+                            type: string
+                          sizeBytes:
+                            type: integer
+                          collectedAt:
+                            type: string
+                            format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum: [DatabaseReady, SweepRunning, ArtifactsAvailable, Failed]
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

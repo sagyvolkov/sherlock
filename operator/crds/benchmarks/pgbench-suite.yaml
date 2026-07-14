@@ -1,0 +1,412 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sherlockpgbenchsuites.sherlock.io
+  annotations:
+    sherlock.io/description: "Parameter-sweep suite for pgbench (PostgreSQL)"
+spec:
+  group: sherlock.io
+  scope: Namespaced
+  names:
+    plural: sherlockpgbenchsuites
+    singular: sherlockpgbenchsuite
+    kind: SherlockPgbenchSuite
+    shortNames:
+      - slpg
+      - slpgbench
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runs
+          type: string
+          jsonPath: .status.summary.runsCompleted
+        - name: Failed
+          type: string
+          jsonPath: .status.summary.runsFailed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [database, execution, sweep, artifacts]
+              properties:
+
+                # ── database ────────────────────────────────────────────────
+                # Identical structure to HammerDB except:
+                #  - type is fixed to postgresql
+                #  - adds partitionedTables field
+                database:
+                  type: object
+                  required: [instancesPerNode, storageSize]
+                  properties:
+                    type:
+                      type: string
+                      enum: [postgresql]
+                      default: postgresql
+                    instancesPerNode:
+                      type: integer
+                      minimum: 1
+                      maximum: 8
+                      default: 1
+                    storageClass:
+                      type: string
+                      default: ""
+                    storageSize:
+                      type: string
+                      pattern: '^[0-9]+[KMGT]i$'
+                    storagePlugin:
+                      type: string
+                      enum: [generic, lightbits, odf, portworx]
+                      default: generic
+                    partitionedTables:
+                      type: boolean
+                      default: false
+                      description: >
+                        When true, the operator initializes pgbench with --partitions=N
+                        where N is derived from instancesPerNode. Requires PostgreSQL
+                        >= 10. CNPG clusters handle the pg_partman setup automatically
+                        when using the CNPG database operator; for vanilla PostgreSQL
+                        the operator runs the DDL via a Job before the prepare phase.
+                        This is a future capability — field is reserved, not yet
+                        implemented. Setting true on v1alpha1 has no effect.
+                    partitionMethod:
+                      type: string
+                      enum: [range, hash]
+                      default: range
+                      description: >
+                        Partition strategy when partitionedTables=true.
+                        Maps to pgbench --partition-method flag.
+                        Only meaningful when partitionedTables=true.
+                    resources:
+                      type: object
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "2"
+                            memory:
+                              type: string
+                              default: "4Gi"
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "4"
+                            memory:
+                              type: string
+                              default: "8Gi"
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+
+                # ── execution ───────────────────────────────────────────────
+                # Identical to HammerDB
+                execution:
+                  type: object
+                  properties:
+                    order:
+                      type: string
+                      enum: [sequential, parallel]
+                      default: sequential
+                    sleepBetweenRuns:
+                      type: integer
+                      minimum: 0
+                      default: 30
+                    failurePolicy:
+                      type: string
+                      enum: [abortAll, retryN, continueAndReport]
+                      default: abortAll
+                    retryLimit:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                    timeoutPerRun:
+                      type: string
+                      pattern: '^[0-9]+(m|h)$'
+                      default: "1h"
+
+                # ── sweep ───────────────────────────────────────────────────
+                sweep:
+                  type: object
+                  required: [clients, scaleFactor, duration]
+                  description: >
+                    pgbench-specific sweep axes. The operator maps these to pgbench
+                    CLI flags: clients→-c, threads→-j, scaleFactor→-s, duration→-T.
+                    readWriteRatio controls which built-in script is used:
+                      100 = read-only  (pgbench -S)
+                        0 = write-only (pgbench --no-vacuum with write script)
+                       other = mixed, operator generates a custom script weighting
+                               SELECT vs UPDATE/INSERT accordingly.
+                  properties:
+                    clients:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 1024
+                      description: "pgbench -c: number of concurrent clients (primary sweep axis)"
+                      example: [1, 2, 8, 16]
+                    threads:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                      default: [4]
+                      description: "pgbench -j: number of worker threads"
+                    readWriteRatio:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 0
+                        maximum: 100
+                      default: [100]
+                      description: >
+                        Percentage of operations that are reads (0–100).
+                        100 = read-only, 0 = write-only, 70 = 70% read / 30% write.
+                      example: [100, 70, 50]
+                    scaleFactor:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                      description: >
+                        pgbench -s: scale factor. Each unit ≈ 16MB of data (100k rows).
+                        scaleFactor=100 → ~1.6GB database.
+                      example: [100]
+                    duration:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 10
+                      description: "pgbench -T: test duration in seconds"
+                      example: [120]
+                    protocol:
+                      type: array
+                      items:
+                        type: string
+                        enum: [simple, extended, prepared]
+                      default: [simple]
+                      description: >
+                        pgbench --protocol: query protocol.
+                        prepared is most representative of real application behaviour.
+
+                # ── artifacts ───────────────────────────────────────────────
+                # Identical structure to HammerDB — omitted here for brevity,
+                # the operator uses the same schema for all benchmark Suite kinds.
+                artifacts:
+                  type: object
+                  required: [destination]
+                  properties:
+                    collectStats:
+                      type: boolean
+                      default: true
+                    compression:
+                      type: string
+                      enum: [gzip, zstd, none]
+                      default: gzip
+                    destination:
+                      type: object
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum: [pvc, s3, local]
+                        pvc:
+                          type: object
+                          properties:
+                            storageClass:
+                              type: string
+                              default: ""
+                            size:
+                              type: string
+                              pattern: '^[0-9]+[KMGT]i$'
+                              default: "20Gi"
+                            accessMode:
+                              type: string
+                              enum: [ReadWriteOnce, ReadWriteMany]
+                              default: ReadWriteOnce
+                        s3:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                              default: "sherlock/{{.SuiteName}}/"
+                            credentialsSecret:
+                              type: string
+                            checksumVerification:
+                              type: boolean
+                              default: true
+                        local:
+                          type: object
+                          properties:
+                            ttlHours:
+                              type: integer
+                              minimum: 1
+                              maximum: 168
+                              default: 24
+                    retention:
+                      type: object
+                      properties:
+                        keepLastN:
+                          type: integer
+                          minimum: 1
+                        ttlDays:
+                          type: integer
+                          minimum: 1
+                        deleteWithSuite:
+                          type: boolean
+                          default: false
+
+            # ── status ────────────────────────────────────────────────────────
+            # Identical structure to HammerDB except result metrics differ:
+            # pgbench reports TPS rather than NOPM/TPM
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Deploying, Ready, Running, Sleeping,
+                         Collecting, Completed, Degraded, Failed]
+                observedGeneration:
+                  type: integer
+                runMatrix:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      params:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      phase:
+                        type: string
+                        enum: [Pending, Running, Completed, Failed, Retrying]
+                      startTime:
+                        type: string
+                        format: date-time
+                      completionTime:
+                        type: string
+                        format: date-time
+                      retryCount:
+                        type: integer
+                        default: 0
+                      artifactPath:
+                        type: string
+                      result:
+                        type: object
+                        properties:
+                          tps:
+                            type: number
+                            description: Transactions per second (pgbench primary metric)
+                          latencyAvgMs:
+                            type: number
+                            description: Average transaction latency (pgbench output)
+                          latencyStddevMs:
+                            type: number
+                          avgReadIops:
+                            type: number
+                          avgWriteIops:
+                            type: number
+                          avgReadBwMBs:
+                            type: number
+                          avgWriteBwMBs:
+                            type: number
+                          avgLatencyMs:
+                            type: number
+                          p95LatencyMs:
+                            type: number
+                          p99LatencyMs:
+                            type: number
+                summary:
+                  type: object
+                  properties:
+                    totalRuns:
+                      type: integer
+                    runsCompleted:
+                      type: integer
+                    runsFailed:
+                      type: integer
+                    runsRemaining:
+                      type: integer
+                    currentRunName:
+                      type: string
+                artifacts:
+                  type: object
+                  properties:
+                    pvcName:
+                      type: string
+                    bundles:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          runName:
+                            type: string
+                          path:
+                            type: string
+                          sizeBytes:
+                            type: integer
+                          collectedAt:
+                            type: string
+                            format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum: [DatabaseReady, SweepRunning, ArtifactsAvailable, Failed]
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
