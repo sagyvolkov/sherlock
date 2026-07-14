@@ -1,0 +1,3 @@
+kopf==1.37.2
+kubernetes==29.0.0
+boto3==1.34.0        # S3 artifact destination

@@ -1,0 +1,50 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sherlock
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sherlock-operator
+  namespace: sherlock
+  labels:
+    app: sherlock-operator
+    app.kubernetes.io/name: sherlock-operator
+    app.kubernetes.io/version: v2.0.0-alpha1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sherlock-operator
+  template:
+    metadata:
+      labels:
+        app: sherlock-operator
+    spec:
+      serviceAccountName: sherlock-operator
+      containers:
+        - name: operator
+          image: quay.io/sagyvolkov/sherlock-operator:v2.0.0-alpha1
+          imagePullPolicy: Always
+          env:
+            - name: SHERLOCK_LOG_LEVEL
+              value: INFO
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          # Operator has no listening ports — it only watches the k8s API
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+      securityContext:
+        runAsNonRoot: true
+      restartPolicy: Always

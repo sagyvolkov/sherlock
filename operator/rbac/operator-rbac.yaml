@@ -1,0 +1,113 @@
+---
+# ServiceAccount for the Sherlock operator pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sherlock-operator
+  namespace: sherlock
+
+---
+# ClusterRole: what the operator needs to watch/manage across the cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sherlock-operator
+rules:
+  # Read nodes (get_worker_nodes, get_node_tolerations)
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+
+  # Manage namespaces (ensure_namespace)
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, create]
+
+  # Manage PVCs (create_pvc, wait_for_pvcs_bound, delete_pvc)
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, create, delete]
+
+  # Manage Services (create_service, get_service_cluster_ip)
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, delete]
+
+  # Manage ConfigMaps (MySQL config, MongoDB init script, result summaries)
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update, replace]
+
+  # Manage Secrets (MSSQL SA password, S3 credentials)
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create]
+
+  # Read Pod logs (get_job_pod_logs)
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+
+  # Manage Deployments (create_deployment, delete_deployment)
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, delete]
+
+  # Manage Jobs (create_job, get_job_status, delete_job)
+  # Also watch Job events for the kopf event handlers
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+
+  # Manage all Sherlock Suite CRDs (kopf needs full access to owned resources)
+  - apiGroups: [sherlock.io]
+    resources:
+      - sherlockpgbenchsuites
+      - sherlockhammerdbsuites
+      - sherlocksysbenchsuites
+      - sherlockycsbbenchsuites
+      - sherlockfiosuites
+    verbs: [get, list, watch, create, update, patch, delete]
+
+  # Status subresource (kopf writes to status)
+  - apiGroups: [sherlock.io]
+    resources:
+      - sherlockpgbenchsuites/status
+      - sherlockhammerdbsuites/status
+      - sherlocksysbenchsuites/status
+      - sherlockycsbbenchsuites/status
+      - sherlockfiosuites/status
+    verbs: [get, update, patch]
+
+  # Finalizers (kopf uses these for cleanup)
+  - apiGroups: [sherlock.io]
+    resources:
+      - sherlockpgbenchsuites/finalizers
+      - sherlockhammerdbsuites/finalizers
+      - sherlocksysbenchsuites/finalizers
+      - sherlockycsbbenchsuites/finalizers
+      - sherlockfiosuites/finalizers
+    verbs: [update]
+
+  # kopf leader election and event posting
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+---
+# Bind ClusterRole to the operator ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sherlock-operator
+subjects:
+  - kind: ServiceAccount
+    name: sherlock-operator
+    namespace: sherlock
+roleRef:
+  kind: ClusterRole
+  name: sherlock-operator
+  apiGroup: rbac.authorization.k8s.io
