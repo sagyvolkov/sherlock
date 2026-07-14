@@ -1,0 +1,40 @@
+# sysbench thread sweep on MySQL
+# threads × testType = 4 × 2 = 8 runs
+# failurePolicy=retryN with retryLimit=2
+---
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockSysbenchSuite
+metadata:
+  name: mysql-thread-sweep
+  namespace: sherlock
+spec:
+  database:
+    type: mysql
+    instancesPerNode: 2
+    storageClass: csi-block
+    storageSize: 50Gi
+    storagePlugin: generic
+  execution:
+    order: sequential
+    sleepBetweenRuns: 30
+    failurePolicy: retryN
+    retryLimit: 2
+    timeoutPerRun: 30m
+  sweep:
+    threads:        [4, 8, 16, 32]
+    tables:         [8]
+    tableSize:      [1000000]
+    testType:       [oltp_read_write, oltp_read_only]
+    duration:       [120]
+    reportInterval: 10
+  artifacts:
+    collectStats: true
+    compression: zstd
+    destination:
+      type: pvc
+      pvc:
+        storageClass: ""
+        size: 10Gi
+    retention:
+      keepLastN: 10
+      deleteWithSuite: false

@@ -1,0 +1,386 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sherlockpgbenchsuites.sherlock.io
+  annotations:
+    sherlock.io/description: "Parameter-sweep suite for sysbench (MySQL / PostgreSQL)"
+spec:
+  group: sherlock.io
+  scope: Namespaced
+  names:
+    plural: sherlocksysbenchsuites
+    singular: sherlocksysbenchsuite
+    kind: SherlockSysbenchSuite
+    shortNames:
+      - slsys
+      - slsysbench
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Runs
+          type: string
+          jsonPath: .status.summary.runsCompleted
+        - name: Failed
+          type: string
+          jsonPath: .status.summary.runsFailed
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [database, execution, sweep, artifacts]
+              properties:
+
+                database:
+                  type: object
+                  required: [type, instancesPerNode, storageSize]
+                  properties:
+                    type:
+                      type: string
+                      enum: [mysql, postgresql]
+                      description: "sysbench supports both MySQL and PostgreSQL"
+                    instancesPerNode:
+                      type: integer
+                      minimum: 1
+                      maximum: 8
+                      default: 1
+                    storageClass:
+                      type: string
+                      default: ""
+                    storageSize:
+                      type: string
+                      pattern: '^[0-9]+[KMGT]i$'
+                    storagePlugin:
+                      type: string
+                      enum: [generic, lightbits, odf, portworx]
+                      default: generic
+                    resources:
+                      type: object
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "2"
+                            memory:
+                              type: string
+                              default: "4Gi"
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                              default: "4"
+                            memory:
+                              type: string
+                              default: "8Gi"
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Exists, Equal]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+
+                execution:
+                  type: object
+                  properties:
+                    order:
+                      type: string
+                      enum: [sequential, parallel]
+                      default: sequential
+                    sleepBetweenRuns:
+                      type: integer
+                      minimum: 0
+                      default: 30
+                    failurePolicy:
+                      type: string
+                      enum: [abortAll, retryN, continueAndReport]
+                      default: abortAll
+                    retryLimit:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                    timeoutPerRun:
+                      type: string
+                      pattern: '^[0-9]+(m|h)$'
+                      default: "1h"
+
+                sweep:
+                  type: object
+                  required: [threads, tables, tableSize, testType, duration]
+                  description: >
+                    sysbench-specific sweep axes. Maps to sysbench CLI flags:
+                    threads→--threads, tables→--tables, tableSize→--table-size,
+                    duration→--time, testType selects the Lua script
+                    (oltp_read_write, oltp_read_only, oltp_write_only, etc.).
+                  properties:
+                    threads:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                        maximum: 1024
+                      description: "sysbench --threads: concurrent worker threads (primary sweep axis)"
+                      example: [4, 8, 16, 32]
+                    tables:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1
+                      default: [8]
+                      description: "sysbench --tables: number of tables"
+                    tableSize:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 1000
+                      description: "sysbench --table-size: rows per table"
+                      example: [1000000]
+                    testType:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        enum:
+                          - oltp_read_write
+                          - oltp_read_only
+                          - oltp_write_only
+                          - oltp_point_select
+                          - oltp_update_index
+                          - oltp_update_non_index
+                          - oltp_insert
+                          - oltp_delete
+                          - bulk_insert
+                          - select_random_points
+                          - select_random_ranges
+                      default: [oltp_read_write]
+                      description: "sysbench Lua script name to use"
+                    duration:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: integer
+                        minimum: 10
+                      description: "sysbench --time: test duration in seconds"
+                      example: [120]
+                    reportInterval:
+                      type: integer
+                      minimum: 1
+                      default: 10
+                      description: >
+                        sysbench --report-interval: how often (seconds) sysbench
+                        prints intermediate stats. Not a sweep axis — single value.
+                        Lower values give finer time-series data in the parsed output.
+
+                artifacts:
+                  type: object
+                  required: [destination]
+                  properties:
+                    collectStats:
+                      type: boolean
+                      default: true
+                    compression:
+                      type: string
+                      enum: [gzip, zstd, none]
+                      default: gzip
+                    destination:
+                      type: object
+                      required: [type]
+                      properties:
+                        type:
+                          type: string
+                          enum: [pvc, s3, local]
+                        pvc:
+                          type: object
+                          properties:
+                            storageClass:
+                              type: string
+                              default: ""
+                            size:
+                              type: string
+                              pattern: '^[0-9]+[KMGT]i$'
+                              default: "20Gi"
+                            accessMode:
+                              type: string
+                              enum: [ReadWriteOnce, ReadWriteMany]
+                              default: ReadWriteOnce
+                        s3:
+                          type: object
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                            prefix:
+                              type: string
+                              default: "sherlock/{{.SuiteName}}/"
+                            credentialsSecret:
+                              type: string
+                            checksumVerification:
+                              type: boolean
+                              default: true
+                        local:
+                          type: object
+                          properties:
+                            ttlHours:
+                              type: integer
+                              minimum: 1
+                              maximum: 168
+                              default: 24
+                    retention:
+                      type: object
+                      properties:
+                        keepLastN:
+                          type: integer
+                          minimum: 1
+                        ttlDays:
+                          type: integer
+                          minimum: 1
+                        deleteWithSuite:
+                          type: boolean
+                          default: false
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Deploying, Ready, Running, Sleeping,
+                         Collecting, Completed, Degraded, Failed]
+                observedGeneration:
+                  type: integer
+                runMatrix:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      params:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      phase:
+                        type: string
+                        enum: [Pending, Running, Completed, Failed, Retrying]
+                      startTime:
+                        type: string
+                        format: date-time
+                      completionTime:
+                        type: string
+                        format: date-time
+                      retryCount:
+                        type: integer
+                        default: 0
+                      artifactPath:
+                        type: string
+                      result:
+                        type: object
+                        properties:
+                          tps:
+                            type: number
+                            description: Transactions per second (sysbench primary metric)
+                          qps:
+                            type: number
+                            description: Queries per second
+                          latencyAvgMs:
+                            type: number
+                          latencyP95Ms:
+                            type: number
+                            description: sysbench reports 95th percentile natively
+                          latencyMaxMs:
+                            type: number
+                          avgReadIops:
+                            type: number
+                          avgWriteIops:
+                            type: number
+                          avgReadBwMBs:
+                            type: number
+                          avgWriteBwMBs:
+                            type: number
+                          avgLatencyMs:
+                            type: number
+                          p95LatencyMs:
+                            type: number
+                          p99LatencyMs:
+                            type: number
+                summary:
+                  type: object
+                  properties:
+                    totalRuns:
+                      type: integer
+                    runsCompleted:
+                      type: integer
+                    runsFailed:
+                      type: integer
+                    runsRemaining:
+                      type: integer
+                    currentRunName:
+                      type: string
+                artifacts:
+                  type: object
+                  properties:
+                    pvcName:
+                      type: string
+                    bundles:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          runName:
+                            type: string
+                          path:
+                            type: string
+                          sizeBytes:
+                            type: integer
+                          collectedAt:
+                            type: string
+                            format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                        enum: [DatabaseReady, SweepRunning, ArtifactsAvailable, Failed]
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

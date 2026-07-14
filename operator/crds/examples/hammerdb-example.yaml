@@ -1,0 +1,43 @@
+# HammerDB TPC-C sweep on MSSQL
+# 3 × 2 = 6 runs, sequential, 30s sleep between each
+# Run names: mssql-vu-sweep-vu8-wh100-rm2-tm5, ...-tm10, ...-vu16-..., etc.
+---
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockHammerDBSuite
+metadata:
+  name: mssql-vu-sweep
+  namespace: sherlock
+spec:
+  database:
+    type: mssql
+    instancesPerNode: 2
+    storageClass: lightbits-nvmeof
+    storageSize: 100Gi
+    storagePlugin: lightbits
+    resources:
+      requests: {cpu: "4", memory: "8Gi"}
+      limits:   {cpu: "8", memory: "16Gi"}
+    nodeSelector:
+      node-role: worker
+  execution:
+    order: sequential
+    sleepBetweenRuns: 30
+    failurePolicy: abortAll
+    timeoutPerRun: 30m
+  sweep:
+    virtualUsers: [8, 16, 32]
+    warehouses:   [100]
+    rampupMins:   [2]
+    testMins:     [5, 10]
+    allWarehouses: [false]
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: pvc
+      pvc:
+        storageClass: ""
+        size: 20Gi
+    retention:
+      keepLastN: 20
+      deleteWithSuite: false

@@ -1,0 +1,57 @@
+# sherlock-common-types.yaml
+# Shared type definitions referenced by all benchmark Suite CRDs.
+# These are not standalone CRDs — they are inline'd or $ref'd into each benchmark CRD.
+# Kept here for documentation and as the source of truth for schema design.
+
+# ─────────────────────────────────────────────
+# DatabaseSpec — how to deploy the database pods
+# ─────────────────────────────────────────────
+# type: DatabaseSpec
+# fields:
+#   type:               postgresql | mysql | mssql | mongodb
+#   instancesPerNode:   int, 1–8
+#   storageClass:       string (empty = cluster default)
+#   storageSize:        string, e.g. "50Gi"
+#   storagePlugin:      generic | lightbits | odf | portworx
+#   partitionedTables:  bool (postgresql/pgbench only, ignored otherwise)
+#   resources:
+#     requests/limits for cpu and memory
+#   nodeSelector:       map[string]string (optional, for pinning to specific nodes)
+#   tolerations:        []Toleration (standard k8s tolerations)
+
+# ─────────────────────────────────────────────
+# ExecutionSpec — how the Suite runs iterations
+# ─────────────────────────────────────────────
+# type: ExecutionSpec
+# fields:
+#   order:              sequential | parallel
+#   sleepBetweenRuns:   int (seconds, default 30, only meaningful for sequential)
+#   failurePolicy:      abortAll | retryN | continueAndReport
+#   retryLimit:         int (only meaningful when failurePolicy=retryN, default 3)
+#   timeoutPerRun:      string, e.g. "30m" (default "1h")
+
+# ─────────────────────────────────────────────
+# ArtifactSpec — where to store run output
+# ─────────────────────────────────────────────
+# type: ArtifactSpec
+# fields:
+#   collectStats:       bool (default true)
+#   compression:        gzip | zstd | none (default gzip)
+#   destination:
+#     type:             pvc | s3 | local
+#     pvc:
+#       storageClass:   string (empty = cluster default)
+#       size:           string, e.g. "20Gi"
+#       accessMode:     ReadWriteOnce | ReadWriteMany (default ReadWriteOnce)
+#     s3:
+#       endpoint:       string (URL)
+#       bucket:         string
+#       prefix:         string (templated: {{.SuiteName}}, {{.RunName}}, {{.Timestamp}})
+#       credentialsSecret: string (name of k8s Secret with access-key / secret-key)
+#       checksumVerification: bool (default true)
+#     local:
+#       ttlHours:       int (how long collector pod stays alive after run, default 24)
+#   retention:
+#     keepLastN:        int (optional, keep only N most recent bundles)
+#     ttlDays:          int (optional, delete bundles older than N days)
+#     deleteWithSuite:  bool (default false — PVC/bundles survive Suite CR deletion)

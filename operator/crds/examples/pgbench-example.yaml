@@ -1,0 +1,42 @@
+# pgbench read/write ratio sweep on PostgreSQL
+# clients × readWriteRatio = 4 × 3 = 12 runs
+# Artifacts to S3 — no PVC required on cluster
+---
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockPgbenchSuite
+metadata:
+  name: postgres-rw-sweep
+  namespace: sherlock
+spec:
+  database:
+    type: postgresql
+    instancesPerNode: 2
+    storageClass: standard
+    storageSize: 50Gi
+    storagePlugin: generic
+    partitionedTables: false
+  execution:
+    order: sequential
+    sleepBetweenRuns: 30
+    failurePolicy: continueAndReport
+    timeoutPerRun: 10m
+  sweep:
+    clients:        [1, 2, 8, 16]
+    threads:        [4]
+    readWriteRatio: [100, 70, 50]
+    scaleFactor:    [100]
+    duration:       [120]
+    protocol:       [simple]
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: s3
+      s3:
+        endpoint: https://s3.us-east-1.amazonaws.com
+        bucket: sherlock-benchmarks
+        prefix: "runs/{{.SuiteName}}/{{.Timestamp}}/"
+        credentialsSecret: sherlock-s3-creds
+    retention:
+      ttlDays: 90
+      deleteWithSuite: false
