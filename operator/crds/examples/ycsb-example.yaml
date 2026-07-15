@@ -13,6 +13,7 @@ spec:
     instancesPerNode: 1
     storageClass: fast-nvme
     storageSize: 100Gi
+    credentialsSecret: sherlock-mongo-creds
     storagePlugin: generic
   execution:
     order: sequential

@@ -15,6 +15,7 @@ from src.handlers.base import (
     BENCHMARK_IMAGE,
 )
 from src.parsers.benchmarks import parse_ycsb
+from src.utils.credentials import resolve as resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,10 @@ DEFAULT_CREDENTIALS = {
 def on_create(name, namespace, spec, patch, **kwargs):
     logger.info(f"[ycsb] Suite {name} created in {namespace}")
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND)
-    deploy_db_infrastructure(name, namespace, spec, patch, DEFAULT_CREDENTIALS)
+    secret_name = spec.get("database", {}).get("credentialsSecret")
+    db_type = spec.get("database", {}).get("type", "ycsb")
+    credentials = resolve_credentials(db_type, namespace, secret_name)
+    deploy_db_infrastructure(name, namespace, spec, patch, credentials)
     patch.status["phase"] = "Ready"
 
 

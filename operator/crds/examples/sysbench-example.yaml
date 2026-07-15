@@ -13,6 +13,7 @@ spec:
     instancesPerNode: 2
     storageClass: csi-block
     storageSize: 50Gi
+    credentialsSecret: sherlock-mysql-creds
     storagePlugin: generic
   execution:
     order: sequential

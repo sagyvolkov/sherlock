@@ -61,6 +61,12 @@ spec:
                     storageSize:
                       type: string
                       pattern: '^[0-9]+[KMGT]i$'
+                    credentialsSecret:
+                      type: string
+                      description: >
+                        Name of a k8s Secret in the same namespace containing
+                        keys: username, password, dbName (and saPassword for mssql).
+                        If omitted, default dev credentials are used — not for production.
                     storagePlugin:
                       type: string
                       enum: [generic, lightbits, odf, portworx]

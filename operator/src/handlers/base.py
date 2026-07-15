@@ -26,6 +26,7 @@ import kopf
 
 from src.utils.matrix import expand, make_run_name, count_runs
 from src.utils import k8s
+from src.utils.artifacts import build_bundle, store_bundle, enforce_retention
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
     launch_stat_collectors, collect_stat_logs
@@ -100,6 +101,13 @@ def deploy_db_infrastructure(
     patch: kopf.Patch,
     db_credentials: dict,
 ) -> list[dict]:
+    # Store credentials in status (non-sensitive fields only — password excluded)
+    # Handlers access username/dbName from status; password passed via Secret ref
+    patch.status["dbCredentials"] = {
+        "username": db_credentials.get("username", ""),
+        "dbName":   db_credentials.get("dbName", ""),
+        # password intentionally not stored in status — handlers re-resolve from Secret
+    }
     """
     Phase: Deploying → Ready
 
@@ -312,10 +320,43 @@ def handle_run_completion(
 
     result = {**bench_results, **storage_results}
 
+    # ── Build and store artifact bundle ───────────────────────────────────────
+    artifacts_spec = spec.get("artifacts", {})
+    patch.status["phase"] = "Collecting"
+    try:
+        bundle = build_bundle(
+            run_name=run_name,
+            benchmark_logs={job_name: benchmark_log},
+            stat_logs={j: k8s.get_job_pod_logs(j, namespace)
+                       for j in (current_run or {}).get("statJobs", [])},
+            parsed_result=result,
+            suite_spec=spec,
+            params=params,
+            compression=artifacts_spec.get("compression", "gzip"),
+        )
+        artifact_path = store_bundle(
+            bundle=bundle,
+            run_name=run_name,
+            suite_name=suite_name,
+            namespace=namespace,
+            artifacts_spec=artifacts_spec,
+            patch=patch,
+        )
+        # Enforce retention policy
+        current_bundles = (
+            patch.status.get("artifacts", {}).get("bundles", [])
+            or status.get("artifacts", {}).get("bundles", [])
+        )
+        enforce_retention(suite_name, artifacts_spec, current_bundles)
+
+    except Exception as e:
+        logger.warning(f"[{suite_name}] Artifact collection failed for {run_name}: {e}")
+        artifact_path = ""
+
     _update_run_phase(
         patch, run_matrix, run_name, "Completed",
         end_time=_now(),
-        extra={"result": result}
+        extra={"result": result, "artifactPath": artifact_path}
     )
     _increment_summary(patch, status, completed=True)
 

@@ -13,6 +13,7 @@ spec:
     instancesPerNode: 2
     storageClass: lightbits-nvmeof
     storageSize: 100Gi
+    credentialsSecret: sherlock-mssql-creds
     storagePlugin: lightbits
     resources:
       requests: {cpu: "4", memory: "8Gi"}

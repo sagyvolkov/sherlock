@@ -105,7 +105,7 @@ def parse_sysbench(raw: str, params: dict) -> dict:
       ...
 
     Replaces print_sysbench_results_per_single_run() which parsed:
-      grep 'transactions\|avg:\|percentile:' | paste -d "@" - - -
+      grep 'transactions|avg:|percentile:' | paste -d "@" - - -
       and extracted values with awk.
     """
     text = _clean(raw)
@@ -167,7 +167,7 @@ def parse_hammerdb(raw: str, params: dict) -> dict:
 
     # Find all "System achieved N NOPM from M SQL Server TPM" lines
     HAMMERDB_RE = re.compile(
-        r'System achieved\s+([\d,]+)\s+NOPM\s+from\s+([\d,]+)\s+\S+\s+TPM'
+        r'System achieved\s+([\d,]+)\s+NOPM\s+from\s+([\d,]+)\s+.+?\s+TPM'
     )
     matches = HAMMERDB_RE.findall(text)
 
@@ -193,15 +193,15 @@ def parse_ycsb(raw: str, params: dict) -> dict:
 
     YCSB produces lines like:
       [OVERALL], Throughput(ops/sec), 12345.67
-      [READ], AverageLatency(us), 234.56
-      [READ], 95thPercentileLatency(us), 456.78
-      [READ], 99thPercentileLatency(us), 789.01
+      grep 'Throughput|[READ], AverageLatency(us), 234.56
+      grep 'Throughput|[READ], 95thPercentileLatency(us), 456.78
+      grep 'Throughput|[READ], 99thPercentileLatency(us), 789.01
       [UPDATE], AverageLatency(us), 345.67
       [UPDATE], 95thPercentileLatency(us), 567.89
       [UPDATE], 99thPercentileLatency(us), 890.12
 
     Replaces print_ycsb_results_per_single_run() which used:
-      grep 'Throughput\|[READ], AverageLatency\|...' | paste -d "@" - - - - -
+      grep 'Throughput|[READ], AverageLatency|...' | paste -d "@" - - - - -
       and awk -F, '{print $3}'
 
     Note: YCSB latency is in microseconds (us) not milliseconds.

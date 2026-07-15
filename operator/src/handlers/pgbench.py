@@ -20,19 +20,13 @@ from src.handlers.base import (
     BENCHMARK_IMAGE,
 )
 from src.parsers.benchmarks import parse_pgbench
+from src.utils.credentials import resolve as resolve_credentials
 
 logger = logging.getLogger(__name__)
 
 GROUP   = "sherlock.io"
 VERSION = "v1alpha1"
 KIND    = "SherlockPgbenchSuite"
-
-# Default DB credentials — overridable via a Secret reference in future
-DEFAULT_CREDENTIALS = {
-    "username": "sherlock",
-    "password": "sherlock",
-    "dbName":   "sherlock",
-}
 
 
 # ── Create ────────────────────────────────────────────────────────────────────
@@ -145,12 +139,14 @@ def on_delete(name, namespace, spec, status, **kwargs):
 
 def _deploy(name, namespace, spec, patch):
     """Deploy PostgreSQL instances and transition to Ready."""
+    secret_name = spec.get("database", {}).get("credentialsSecret")
+    credentials = resolve_credentials("postgresql", namespace, secret_name)
     deploy_db_infrastructure(
         name=name,
         namespace=namespace,
         spec=spec,
         patch=patch,
-        db_credentials=DEFAULT_CREDENTIALS,
+        db_credentials=credentials,
     )
     patch.status["phase"] = "Ready"
 
@@ -178,12 +174,16 @@ def _build_command(params: dict, db_ip: str) -> list[str]:
     # 100 = read-only (-S), 0 = write-only, other = custom script
     read_only = "true" if rw_ratio == 100 else "false"
 
+    # Credentials are passed in via params dict (populated from status.credentials
+    # which is set during the deploy phase)
+    username = params.get("_username", "sherlock")
+    password = params.get("_password", "sherlock")
+    db_name  = params.get("_dbName",   "sherlock")
+
     command = (
         f"./run_pgbench run {db_ip} {clients} {threads} "
         f"time {duration} false false {scale} "
-        f"{DEFAULT_CREDENTIALS['username']} "
-        f"{DEFAULT_CREDENTIALS['password']} "
-        f"{DEFAULT_CREDENTIALS['dbName']} "
+        f"{username} {password} {db_name} "
         f"10 {read_only}"
     )
 
