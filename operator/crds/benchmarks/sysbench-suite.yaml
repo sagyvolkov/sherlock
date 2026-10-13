@@ -1,7 +1,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: sherlockpgbenchsuites.sherlock.io
+  name: sherlocksysbenchsuites.sherlock.io
   annotations:
     sherlock.io/description: "Parameter-sweep suite for sysbench (MySQL / PostgreSQL)"
 spec:
