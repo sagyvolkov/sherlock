@@ -33,4 +33,4 @@ def configure(settings: kopf.OperatorSettings, **kwargs):
 
 
 if __name__ == '__main__':
-    kopf.run()
+    kopf.run(clusterwide=True)

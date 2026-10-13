@@ -92,7 +92,7 @@ rules:
   # kopf leader election and event posting
   - apiGroups: [""]
     resources: [events]
-    verbs: [create, patch]
+    verbs: [get, list, watch, create, patch]
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
