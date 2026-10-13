@@ -55,6 +55,21 @@ def expand(sweep: dict) -> list[dict]:
     return [dict(zip(keys, combo)) for combo in combinations]
 
 
+
+_NAME_EXCLUDE = frozenset({
+    "groupReporting",
+    "outputFormat",
+    "reportInterval",
+})
+
+def _should_include_in_name(key: str, value) -> bool:
+    if key in _NAME_EXCLUDE:
+        return False
+    if isinstance(value, bool):
+        return False
+    return True
+
+
 def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
     """
     Generate a deterministic run name from the suite name and parameter values.
@@ -106,6 +121,8 @@ def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
 
     parts = [suite_name]
     for key, value in params.items():
+        if not _should_include_in_name(key, value):
+            continue
         abbrev = ABBREV.get(key, key)
         # Clean the value: remove non-alphanumeric chars except letters/digits
         clean_value = str(value).replace(" ", "").replace("_", "")

@@ -12,6 +12,7 @@ import kopf
 from src.handlers.base import (
     initialize_suite, deploy_db_infrastructure,
     run_next_benchmark, handle_run_completion,
+    _update_run_phase, _now,
     BENCHMARK_IMAGE,
 )
 from src.parsers.benchmarks import parse_fio
@@ -94,7 +95,13 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
     fio_per_worker = storage.get("fioPerWorker", 1)
 
     patch.status["phase"] = "Running"
-    patch.status["summary"]["currentRunName"] = run_name
+    # Build updated summary by merging with existing status.summary
+    existing_summary = dict(status.get("summary", {}))
+    existing_summary["currentRunName"] = run_name
+    patch.status["summary"] = existing_summary
+
+    # Mark this run as Running in the matrix (prevents re-entry on next phase event)
+    _update_run_phase(patch, run_matrix, run_name, "Running", start_time=_now())
 
     # Launch stat collectors
     stat_jobs = {}
@@ -107,13 +114,13 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
         )
 
     # Launch one fio Job per PVC
+    benchmark_jobs = []
     for j, pvc_name in enumerate(pvc_names):
         node_idx  = j % len(worker_nodes)
         node_name = worker_nodes[node_idx]
         job_name  = f"{name}-fio-{run_name}-{j}"[:63]
         command   = _build_fio_command(params, volume_mode, pvc_name)
 
-        mount_path = "/data" if volume_mode == "Filesystem" else None
         pvc_mounts = (
             [{"pvc_name": pvc_name, "mount_path": "/data"}]
             if volume_mode == "Filesystem" else []
@@ -132,6 +139,14 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
             resources=storage.get("resources", {}),
             pvc_mounts=pvc_mounts,
         )
+        benchmark_jobs.append(job_name)
+
+    # Store job refs in the run entry so the job event handler can match them
+    _update_run_phase(
+        patch, run_matrix, run_name, "Running",
+        extra={"benchmarkJobs": benchmark_jobs,
+               "statJobs": list(stat_jobs.keys())}
+    )
 
     logger.info(f"[fio] Run {run_name} started on {len(pvc_names)} PVCs")
 
