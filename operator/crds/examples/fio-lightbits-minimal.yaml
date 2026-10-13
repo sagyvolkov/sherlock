@@ -1,0 +1,41 @@
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockFioSuite
+metadata:
+  name: fio-smoke-test
+  namespace: sherlock
+spec:
+  storage:
+    storageClass: lb-replica3-xfs
+    storageSize: 110Gi
+    storagePlugin: generic
+    volumeMode: Filesystem
+    fioPerWorker: 1
+    workerCount: 3
+    nodeSelector:
+      node-role.kubernetes.io/worker: ""
+  execution:
+    order: sequential
+    sleepBetweenRuns: 10
+    failurePolicy: abortAll
+    timeoutPerRun: 10m
+  sweep:
+    blockSize:   ["128k"]
+    rwMixWrite:  [0]
+    ioPattern:   [read]
+    runtime:     [60]
+    jobs:        [4]
+    ioDepth:     [4]
+    workSize:    ["100g"]
+    directIO:    [1]
+    groupReporting: true
+    outputFormat: json
+  artifacts:
+    collectStats: true
+    compression: gzip
+    destination:
+      type: local
+      local:
+        ttlHours: 24
+    retention:
+      keepLastN: 5
+      deleteWithSuite: false

@@ -1,0 +1,35 @@
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: sherlock-nonroot
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+defaultAllowPrivilegeEscalation: false
+fsGroup:
+  type: MustRunAs
+  ranges:
+    - min: 1000
+      max: 1000
+runAsUser:
+  type: MustRunAsRange
+  uidRangeMin: 1000
+  uidRangeMax: 1000
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+users:
+  - system:serviceaccount:sherlock:sherlock-operator
+groups: []
