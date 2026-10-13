@@ -67,43 +67,29 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
 
 @kopf.on.event('batch', 'v1', 'jobs',
                labels={f'{GROUP}/suite-kind': KIND})
-def on_job_event(name, namespace, spec, status, meta, patch, **kwargs):
-    """
-    Watch all Jobs that belong to a pgbench Suite run.
-    On completion or failure, trigger result collection and advance to next run.
-    """
+def on_job_event(name, namespace, spec, status, meta, **kwargs):
     conditions = (status or {}).get("conditions", [])
     suite_name = meta.get("labels", {}).get("sherlock.io/suite-name", "")
     run_name   = meta.get("labels", {}).get("sherlock.io/run-name", "")
-    role       = meta.get("labels", {}).get("sherlock.io/role", "")
-
-    if role != "benchmark":
-        return  # ignore stat collector jobs here
-
-    complete = any(c.get("type") == "Complete" and c.get("status") == "True"
-                   for c in conditions)
-    failed   = any(c.get("type") == "Failed"   and c.get("status") == "True"
-                   for c in conditions)
-
+    if meta.get("labels", {}).get("sherlock.io/role") != "benchmark":
+        return
+    complete = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions)
+    failed   = any(c.get("type") == "Failed"   and c.get("status") == "True" for c in conditions)
     if not (complete or failed):
-        return  # still running
-
-    # Load the parent Suite CR to get current status
-    suite = kopf.get(GROUP, VERSION, KIND, name=suite_name, namespace=namespace)
+        return
+    from src.utils import k8s
+    suite = k8s.get_custom_resource(GROUP, VERSION, "sherlockpgbenchsuites", suite_name, namespace)
     if not suite:
         return
-
+    from src.handlers.base import _SuitePatch
+    suite_patch = _SuitePatch(plural="sherlockpgbenchsuites")
     handle_run_completion(
-        suite_name=suite_name,
-        namespace=namespace,
-        spec=suite.get("spec", {}),
-        status=suite.get("status", {}),
-        patch=patch,
-        run_name=run_name,
-        job_name=name,
-        succeeded=complete,
-        parse_results=parse_pgbench,
+        suite_name=suite_name, namespace=namespace,
+        spec=suite.get("spec", {}), status=suite.get("status", {}),
+        patch=suite_patch, run_name=run_name, job_name=name,
+        succeeded=complete, parse_results=parse_pgbench,
     )
+    suite_patch.flush(suite_name, namespace)
 
 
 # ── Delete ────────────────────────────────────────────────────────────────────

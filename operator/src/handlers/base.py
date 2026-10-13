@@ -48,6 +48,31 @@ BENCHMARK_IMAGE = "quay.io/sagyvolkov/benchmark-container:sherlock0.5"
 
 # ── Phase transitions ─────────────────────────────────────────────────────────
 
+
+class _SuitePatch:
+    """
+    Accumulates status writes and flushes them directly to a suite's
+    status subresource via CustomObjectsApi.
+
+    Used by on_job_event handlers where kopf's `patch` belongs to the
+    watched Job object, not the suite CR.
+    """
+    def __init__(self, plural: str):
+        self._status = {}
+        self._plural = plural
+
+    @property
+    def status(self):
+        return self._status
+
+    def flush(self, suite_name: str, namespace: str):
+        from src.utils import k8s as _k8s
+        if self._status:
+            _k8s.patch_suite_status(
+                "sherlock.io", "v1alpha1", self._plural,
+                suite_name, namespace, self._status,
+            )
+
 def initialize_suite(
     name: str,
     namespace: str,

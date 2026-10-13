@@ -52,7 +52,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
 
 
 @kopf.on.event('batch', 'v1', 'jobs', labels={f'{GROUP}/suite-kind': KIND})
-def on_job_event(name, namespace, spec, status, meta, patch, **kwargs):
+def on_job_event(name, namespace, spec, status, meta, **kwargs):
     conditions = (status or {}).get("conditions", [])
     suite_name = meta.get("labels", {}).get("sherlock.io/suite-name", "")
     run_name   = meta.get("labels", {}).get("sherlock.io/run-name", "")
@@ -62,15 +62,20 @@ def on_job_event(name, namespace, spec, status, meta, patch, **kwargs):
     failed   = any(c.get("type") == "Failed"   and c.get("status") == "True" for c in conditions)
     if not (complete or failed):
         return
-    suite = kopf.get(GROUP, VERSION, KIND, name=suite_name, namespace=namespace)
+    from src.utils import k8s
+    suite = k8s.get_custom_resource(GROUP, VERSION, "sherlocksysbenchsuites", suite_name, namespace)
     if not suite:
         return
+    from src.handlers.base import _SuitePatch
+    suite_patch = _SuitePatch(plural="sherlocksysbenchsuites")
     handle_run_completion(
         suite_name=suite_name, namespace=namespace,
         spec=suite.get("spec", {}), status=suite.get("status", {}),
-        patch=patch, run_name=run_name, job_name=name,
+        patch=suite_patch, run_name=run_name, job_name=name,
         succeeded=complete, parse_results=parse_sysbench,
     )
+    suite_patch.flush(suite_name, namespace)
+
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)

@@ -151,24 +151,6 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
     logger.info(f"[fio] Run {run_name} started on {len(pvc_names)} PVCs")
 
 
-class _SuitePatch:
-    """Accumulates status writes and flushes them to the suite's status subresource."""
-    def __init__(self):
-        self._status = {}
-
-    @property
-    def status(self):
-        return self._status
-
-    def flush(self, suite_name, namespace):
-        from src.utils import k8s as _k8s
-        if self._status:
-            _k8s.patch_suite_status(
-                GROUP, VERSION, "sherlockfiosuites",
-                suite_name, namespace, self._status,
-            )
-
-
 @kopf.on.event('batch', 'v1', 'jobs', labels={f'{GROUP}/suite-kind': KIND})
 def on_job_event(name, namespace, spec, status, meta, **kwargs):
     conditions = (status or {}).get("conditions", [])
@@ -184,7 +166,8 @@ def on_job_event(name, namespace, spec, status, meta, **kwargs):
     suite = k8s.get_custom_resource(GROUP, VERSION, "sherlockfiosuites", suite_name, namespace)
     if not suite:
         return
-    suite_patch = _SuitePatch()
+    from src.handlers.base import _SuitePatch
+    suite_patch = _SuitePatch(plural="sherlockfiosuites")
     handle_run_completion(
         suite_name=suite_name, namespace=namespace,
         spec=suite.get("spec", {}), status=suite.get("status", {}),
