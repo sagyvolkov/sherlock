@@ -31,6 +31,13 @@ def configure(settings: kopf.OperatorSettings, **kwargs):
     settings.watching.server_timeout = 60
     settings.watching.client_timeout = 70
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+)
+logging.getLogger('kubernetes').setLevel(logging.WARNING)
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 if __name__ == '__main__':
     kopf.run(clusterwide=True)

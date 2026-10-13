@@ -510,6 +510,16 @@ spec:
                             type: number
                           p99LatencyMs:
                             type: number
+                pvcNames:
+                  type: array
+                  description: Names of PVCs provisioned by on_create.
+                  items:
+                    type: string
+                workerNodes:
+                  type: array
+                  description: Names of worker nodes selected by on_create.
+                  items:
+                    type: string
                 summary:
                   type: object
                   properties:

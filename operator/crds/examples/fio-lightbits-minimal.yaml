@@ -25,7 +25,7 @@ spec:
     runtime:     [60]
     jobs:        [4]
     ioDepth:     [4]
-    workSize:    ["100g"]
+    workSize:    ["20g"]
     directIO:    [1]
     groupReporting: true
     outputFormat: json

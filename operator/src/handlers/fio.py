@@ -23,7 +23,7 @@ GROUP   = "sherlock.io"
 VERSION = "v1alpha1"
 KIND = "SherlockFioSuite"
 
-FIO_IMAGE = "quay.io/sagyvolkov/fio_container:0.5"
+FIO_IMAGE = "quay.io/sagyvolkov/fio_container:0.6"
 
 
 @kopf.on.create(GROUP, VERSION, KIND)
@@ -151,8 +151,26 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
     logger.info(f"[fio] Run {run_name} started on {len(pvc_names)} PVCs")
 
 
+class _SuitePatch:
+    """Accumulates status writes and flushes them to the suite's status subresource."""
+    def __init__(self):
+        self._status = {}
+
+    @property
+    def status(self):
+        return self._status
+
+    def flush(self, suite_name, namespace):
+        from src.utils import k8s as _k8s
+        if self._status:
+            _k8s.patch_suite_status(
+                GROUP, VERSION, "sherlockfiosuites",
+                suite_name, namespace, self._status,
+            )
+
+
 @kopf.on.event('batch', 'v1', 'jobs', labels={f'{GROUP}/suite-kind': KIND})
-def on_job_event(name, namespace, spec, status, meta, patch, **kwargs):
+def on_job_event(name, namespace, spec, status, meta, **kwargs):
     conditions = (status or {}).get("conditions", [])
     suite_name = meta.get("labels", {}).get("sherlock.io/suite-name", "")
     run_name   = meta.get("labels", {}).get("sherlock.io/run-name", "")
@@ -162,15 +180,18 @@ def on_job_event(name, namespace, spec, status, meta, patch, **kwargs):
     failed   = any(c.get("type") == "Failed"   and c.get("status") == "True" for c in conditions)
     if not (complete or failed):
         return
-    suite = kopf.get(GROUP, VERSION, KIND, name=suite_name, namespace=namespace)
+    from src.utils import k8s
+    suite = k8s.get_custom_resource(GROUP, VERSION, "sherlockfiosuites", suite_name, namespace)
     if not suite:
         return
+    suite_patch = _SuitePatch()
     handle_run_completion(
         suite_name=suite_name, namespace=namespace,
         spec=suite.get("spec", {}), status=suite.get("status", {}),
-        patch=patch, run_name=run_name, job_name=name,
+        patch=suite_patch, run_name=run_name, job_name=name,
         succeeded=complete, parse_results=parse_fio,
     )
+    suite_patch.flush(suite_name, namespace)
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)
@@ -202,8 +223,10 @@ def _build_fio_command(params: dict, volume_mode: str, pvc_name: str) -> list[st
     direct    = params.get("directIO", 1)
     dev_type  = "FS" if volume_mode == "Filesystem" else "RAW"
     filename  = "/data" if volume_mode == "Filesystem" else f"/dev/{pvc_name}"
-    cmd = (
-        f"./run_fio {rw} {bs} {filename} {runtime} "
-        f"{jobs} {iodepth} {worksize} {dev_type} {direct} {pattern}"
-    )
-    return ["bash", "-c", cmd]
+    output_fmt = params.get("outputFormat", "json")
+    return [
+        "/scripts/run_fio",
+        str(rw), str(bs), str(filename), str(runtime),
+        str(jobs), str(iodepth), str(worksize), str(dev_type), str(direct), str(pattern),
+        str(output_fmt),
+    ]

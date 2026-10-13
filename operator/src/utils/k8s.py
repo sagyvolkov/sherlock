@@ -34,6 +34,31 @@ def load_config():
 
 # ── Namespace ────────────────────────────────────────────────────────────────
 
+
+
+def patch_suite_status(group: str, version: str, plural: str,
+                       name: str, namespace: str, status_patch: dict) -> None:
+    """Patch the status subresource of a namespaced custom resource."""
+    load_config()
+    from kubernetes import client
+    api = client.CustomObjectsApi()
+    api.patch_namespaced_custom_object_status(
+        group, version, namespace, plural, name,
+        {"status": status_patch},
+    )
+
+def get_custom_resource(group: str, version: str, plural: str, name: str, namespace: str) -> dict:
+    """Fetch a single namespaced custom resource. Returns None if not found."""
+    load_config()
+    from kubernetes import client
+    api = client.CustomObjectsApi()
+    try:
+        return api.get_namespaced_custom_object(group, version, namespace, plural, name)
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+
 def ensure_namespace(namespace: str):
     """
     Create namespace if it does not exist.

@@ -55,9 +55,13 @@ rules:
 
   # Manage Jobs (create_job, get_job_status, delete_job)
   # Also watch Job events for the kopf event handlers
+  # patch/update needed so kopf can write handler progress annotations on Job objects
   - apiGroups: [batch]
     resources: [jobs]
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get, update, patch]
 
   # Manage all Sherlock Suite CRDs (kopf needs full access to owned resources)
   - apiGroups: [sherlock.io]
