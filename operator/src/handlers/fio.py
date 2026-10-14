@@ -29,13 +29,17 @@ FIO_IMAGE = "quay.io/sagyvolkov/fio_container:0.6"
 
 
 @kopf.on.create(GROUP, VERSION, KIND)
-def on_create(name, namespace, spec, patch, **kwargs):
+def on_create(name, namespace, spec, patch, body, **kwargs):
     """
     fio is storage-only — no database layer.
     Goes Pending → Provisioning (PVCs) → Ready → Running.
+
+    PVCs are <namePrefix>-pvc-N (default prefix "fio") and are reused by a
+    later suite with the same layout, like database volumes. fio has no
+    prepare step, so the marker is written as soon as the PVCs are Bound.
     """
     logger.info(f"[fio] Suite {name} created in {namespace}")
-    from src.utils import k8s
+    from src.utils import k8s, volumes
 
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND, is_fio=True)
 
@@ -54,22 +58,41 @@ def on_create(name, namespace, spec, patch, **kwargs):
 
     k8s.ensure_namespace(namespace)
     total = fio_per_worker * len(worker_nodes)
-    pvc_names = []
-    for j in range(total):
-        pvc_name = f"{name}-fio-pvc-{j}"
-        k8s.create_pvc(
-            name=pvc_name, namespace=namespace,
-            storage_size=storage_size, storage_class=storage_class,
-            volume_mode=volume_mode,
+    vol = volumes.settings(storage, default_prefix="fio")
+    layout = volumes.make_layout(
+        suite_kind=KIND,
+        total=total,
+        instances_per_node=fio_per_worker,
+        workers=len(worker_nodes),
+        storage_class=storage_class,
+        storage_size=storage_size,
+        volume_mode=volume_mode,
+    )
+    try:
+        pvc_names, reused = volumes.ensure_volume_set(
+            prefix=vol["namePrefix"],
+            namespace=namespace,
+            layout=layout,
+            owner=body,
+            on_create=vol["onCreate"],
             labels={"sherlock.io/suite": name, "sherlock.io/role": "fio-pvc"},
+            bound_timeout=900,
         )
-        pvc_names.append(pvc_name)
-
-    k8s.wait_for_pvcs_bound(namespace, pvc_names, timeout=900)
+    except volumes.VolumesBusy as e:
+        logger.info(f"[fio] {name} waiting: {e}")
+        raise kopf.TemporaryError(str(e), delay=60)
+    if not reused:
+        volumes.mark_prepared(namespace, pvc_names, layout)
 
     patch.status["phase"] = "Ready"
     patch.status["workerNodes"] = worker_nodes
     patch.status["pvcNames"] = pvc_names
+    patch.status["volumes"] = {
+        "namePrefix": vol["namePrefix"],
+        "pvcNames":   pvc_names,
+        "layout":     layout,
+        "reused":     reused,
+    }
     patch.status["summary"] = {"totalPvcsProvisioned": total}
 
 
@@ -183,16 +206,15 @@ def on_timer(name, namespace, status, patch, **kwargs):
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)
-def on_delete(name, namespace, spec, status, **kwargs):
-    """Clean up PVCs if deleteWithSuite=true."""
-    delete_pvcs = (
-        spec.get("artifacts", {}).get("retention", {}).get("deleteWithSuite", False)
-    )
-    if delete_pvcs:
-        from src.utils import k8s
-        for pvc_name in status.get("pvcNames", []):
-            k8s.delete_pvc(pvc_name, namespace)
-    logger.info(f"[fio] Suite {name} deleted")
+def on_delete(name, namespace, spec, status, meta, **kwargs):
+    """Keep the PVCs, or delete them if storage.volumes.onSuiteDelete=delete."""
+    from src.utils import volumes
+    vol = volumes.settings(spec.get("storage", {}), default_prefix="fio")
+    prefix = ((status or {}).get("volumes") or {}).get("namePrefix")
+    if prefix and vol["onSuiteDelete"] == "delete":
+        deleted = volumes.delete_claimed(prefix, namespace, meta["uid"])
+        logger.info(f"[fio] Deleted {len(deleted)} PVCs of volume set {prefix}")
+    logger.info(f"[fio] Suite {name} deleted (volumes: {vol['onSuiteDelete']})")
 
 
 def _build_fio_command(params: dict, volume_mode: str, pvc_name: str) -> list[str]:

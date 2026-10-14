@@ -38,4 +38,3 @@ spec:
         size: 10Gi
     retention:
       keepLastN: 10
-      deleteWithSuite: false

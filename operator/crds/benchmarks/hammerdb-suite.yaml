@@ -74,6 +74,40 @@ spec:
                       type: string
                       pattern: '^[0-9]+[KMGT]i$'
                       description: "PVC size per database instance, e.g. 100Gi"
+                    volumes:
+                      type: object
+                      description: >
+                        How the database PVCs are named and whether they outlive the suite.
+                        PVCs are <namePrefix>-pvc-N. After a successful data load each PVC
+                        records the layout it was prepared for (count, instancesPerNode,
+                        workers, storage class and size, dataset params). A later suite with
+                        the same namePrefix reuses the PVCs, and skips the data load, only if
+                        all of them exist, are Bound and match its layout exactly; otherwise
+                        every PVC with that prefix is deleted and the set is created fresh.
+                      properties:
+                        namePrefix:
+                          type: string
+                          maxLength: 40
+                          pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                          description: >
+                            Prefix for PVC names (default: the database type)
+                            and for the database Deployments and Services (<namePrefix>-N).
+                            Not tied to the suite name, so the next suite can find the PVCs.
+                            Two suites using the same prefix run one after the other.
+                        onSuiteDelete:
+                          type: string
+                          enum: [retain, delete]
+                          default: retain
+                          description: >
+                            retain: keep the PVCs (and the prepared data) when the suite is
+                            deleted. delete: delete them, unless a later suite has taken them over.
+                        onCreate:
+                          type: string
+                          enum: [reuse, recreate]
+                          default: reuse
+                          description: >
+                            reuse: reuse matching prepared PVCs. recreate: always delete and
+                            recreate them, which also forces a fresh data load.
                     credentialsSecret:
                       type: string
                       description: >
@@ -364,13 +398,6 @@ spec:
                           description: >
                             Delete bundles older than N days. The operator runs a
                             cleanup reconcile daily.
-                        deleteWithSuite:
-                          type: boolean
-                          default: false
-                          description: >
-                            If true, deleting the SherlockHammerDBSuite CR also deletes
-                            the artifact PVC or S3 objects. Default false to prevent
-                            accidental data loss.
 
             # ── status ────────────────────────────────────────────────────────
             status:
@@ -473,6 +500,22 @@ spec:
                             type: number
                           p99LatencyMs:
                             type: number
+                volumes:
+                  type: object
+                  description: PVC set used by this suite (see spec volumes).
+                  properties:
+                    namePrefix:
+                      type: string
+                    pvcNames:
+                      type: array
+                      items:
+                        type: string
+                    reused:
+                      type: boolean
+                      description: True if the PVCs were left by an earlier suite with the same layout.
+                    layout:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                 deployments:
                   type: array
                   description: Database instances deployed by on_create.

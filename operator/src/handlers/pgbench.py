@@ -15,7 +15,7 @@ import logging
 import kopf
 
 from src.handlers.base import (
-    initialize_suite, deploy_db_infrastructure,
+    initialize_suite, deploy_db_infrastructure, teardown_db_suite,
     run_next_benchmark,
     BENCHMARK_IMAGE,
     on_benchmark_job_event, on_suite_timer,
@@ -34,14 +34,14 @@ PLURAL  = "sherlockpgbenchsuites"
 # ── Create ────────────────────────────────────────────────────────────────────
 
 @kopf.on.create(GROUP, VERSION, KIND)
-def on_create(name, namespace, spec, patch, **kwargs):
+def on_create(name, namespace, spec, patch, body, **kwargs):
     """
     Called when a new SherlockPgbenchSuite CR is created.
     Expands the sweep matrix and starts deploying database pods.
     """
     logger.info(f"[pgbench] Suite {name} created in {namespace}")
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND)
-    _deploy(name, namespace, spec, patch)
+    _deploy(name, namespace, spec, patch, body)
 
 
 # ── Phase watcher: Ready → Running ────────────────────────────────────────────
@@ -90,30 +90,9 @@ def on_timer(name, namespace, status, patch, **kwargs):
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)
-def on_delete(name, namespace, spec, status, **kwargs):
-    """
-    Clean up database pods when the Suite CR is deleted.
-    PVCs are only deleted if artifacts.retention.deleteWithSuite=true.
-    """
-    db_spec    = spec.get("database", {})
-    delete_pvcs = (
-        spec.get("artifacts", {})
-        .get("retention", {})
-        .get("deleteWithSuite", False)
-    )
-    total = db_spec.get("instancesPerNode", 1) * len(
-        status.get("deployments", [])
-    )
-    if total > 0:
-        from src.db.deploy import teardown_databases
-        teardown_databases(
-            suite_name=name,
-            namespace=namespace,
-            db_type=db_spec.get("type", "postgresql"),
-            total_instances=total,
-            delete_pvcs=delete_pvcs,
-        )
-    logger.info(f"[pgbench] Suite {name} cleaned up")
+def on_delete(name, namespace, spec, status, meta, **kwargs):
+    """Database pods go with the suite; PVCs per database.volumes.onSuiteDelete."""
+    teardown_db_suite(name, namespace, spec, status, meta["uid"])
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -122,7 +101,7 @@ def on_delete(name, namespace, spec, status, **kwargs):
 _WORKLOAD_TYPES = {100: "readonly", 90: "90r10w", 70: "70r30w"}
 
 
-def _deploy(name, namespace, spec, patch):
+def _deploy(name, namespace, spec, patch, body):
     """Deploy PostgreSQL instances and transition to Ready."""
     secret_name = spec.get("database", {}).get("credentialsSecret")
     credentials = resolve_credentials("postgresql", namespace, secret_name)
@@ -132,6 +111,8 @@ def _deploy(name, namespace, spec, patch):
         spec=spec,
         patch=patch,
         db_credentials=credentials,
+        owner=body,
+        suite_kind=KIND,
     )
     patch.status["phase"] = "Ready"
 
@@ -156,16 +137,12 @@ def _build_command(params: dict, db_ip: str) -> list[str]:
     return ["bash", "-c", _run_pgbench(action, params, db_ip)]
 
 
-def _build_prepare_command(params: dict, prev_params, db_ip: str):
+def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
     """
     Build the `run_pgbench prepare` command (pgbench -i) for a run.
 
-    Returns None when the previous run used the same scaleFactor, since the
-    tables it left behind can be reused.
+    base skips it when the volumes already hold tables for this scaleFactor.
     """
-    scale = params.get("scaleFactor", 100)
-    if prev_params is not None and prev_params.get("scaleFactor", 100) == scale:
-        return None
     return ["bash", "-c", _run_pgbench("prepare", params, db_ip)]
 
 

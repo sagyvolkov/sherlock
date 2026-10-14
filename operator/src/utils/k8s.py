@@ -20,17 +20,24 @@ logger = logging.getLogger(__name__)
 
 # ── Client initialisation ────────────────────────────────────────────────────
 
+_config_loaded = False
+
+
 def load_config():
     """
     Load k8s config — in-cluster when running as a pod, local kubeconfig
-    when running for development. Called once at operator startup.
+    when running for development. Only the first call does anything.
     """
+    global _config_loaded
+    if _config_loaded:
+        return
     try:
         config.load_incluster_config()
         logger.info("Loaded in-cluster k8s config")
     except config.ConfigException:
         config.load_kube_config()
         logger.info("Loaded local kubeconfig")
+    _config_loaded = True
 
 
 # ── Namespace ────────────────────────────────────────────────────────────────
@@ -99,6 +106,7 @@ def create_pvc(
     storage_class: str = "",
     volume_mode: str = "Filesystem",
     labels: Optional[dict] = None,
+    annotations: Optional[dict] = None,
 ) -> client.V1PersistentVolumeClaim:
     """
     Create a PVC and return it.
@@ -123,6 +131,7 @@ def create_pvc(
             name=name,
             namespace=namespace,
             labels=labels or {},
+            annotations=annotations or None,
         ),
         spec=spec,
     )
@@ -178,6 +187,51 @@ def delete_pvc(name: str, namespace: str):
             raise
 
 
+def list_pvcs(namespace: str) -> list:
+    """All PVCs in the namespace."""
+    return client.CoreV1Api().list_namespaced_persistent_volume_claim(namespace).items
+
+
+def read_pvc(name: str, namespace: str):
+    """Return the PVC, or None if it does not exist."""
+    try:
+        return client.CoreV1Api().read_namespaced_persistent_volume_claim(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+
+
+def patch_pvc_metadata(name: str, namespace: str,
+                       labels: Optional[dict] = None,
+                       annotations: Optional[dict] = None):
+    """Merge labels/annotations into a PVC; a None value removes the key."""
+    metadata = {}
+    if labels is not None:
+        metadata["labels"] = labels
+    if annotations is not None:
+        metadata["annotations"] = annotations
+    client.CoreV1Api().patch_namespaced_persistent_volume_claim(
+        name, namespace, {"metadata": metadata},
+    )
+
+
+def wait_for_pvcs_deleted(namespace: str, pvc_names: list[str], timeout: int = 600):
+    """
+    Block until none of the named PVCs exist any more. A PVC stays
+    Terminating while a pod still mounts it (kubernetes.io/pvc-protection).
+    """
+    deadline = time.time() + timeout
+    pending = set(pvc_names)
+    while pending and time.time() < deadline:
+        pending = {n for n in pending if read_pvc(n, namespace) is not None}
+        if pending:
+            time.sleep(5)
+    if pending:
+        raise TimeoutError(f"PVCs not deleted within {timeout}s: {sorted(pending)}")
+    logger.info(f"PVCs deleted: {sorted(pvc_names)}")
+
+
 # ── Deployments (database pods) ───────────────────────────────────────────────
 
 def create_deployment(
@@ -191,6 +245,7 @@ def create_deployment(
     port: int,
     resources: dict,
     labels: Optional[dict] = None,
+    owner: Optional[dict] = None,
 ) -> client.V1Deployment:
     """
     Create a single-replica Deployment for a database pod.
@@ -199,6 +254,9 @@ def create_deployment(
 
     The caller is responsible for passing the correct image and env_vars
     for each database type.
+
+    owner: suite CR that owns the Deployment, which is then garbage-collected
+    with the suite. Its PVC is not owned and outlives both.
     """
     apps_v1 = client.AppsV1Api()
 
@@ -261,7 +319,8 @@ def create_deployment(
 
     deployment = client.V1Deployment(
         metadata=client.V1ObjectMeta(
-            name=name, namespace=namespace, labels=lbl
+            name=name, namespace=namespace, labels=lbl,
+            owner_references=[owner_reference(owner)] if owner else None,
         ),
         spec=client.V1DeploymentSpec(
             replicas=1,
@@ -290,15 +349,21 @@ def create_deployment(
         raise
 
 
-def create_service(name: str, namespace: str, port: int, labels: Optional[dict] = None):
+def create_service(name: str, namespace: str, port: int, labels: Optional[dict] = None,
+                   owner: Optional[dict] = None):
     """
     Create a ClusterIP Service for a database Deployment.
     Replaces create_service() in the original create_databases bash script.
+
+    owner: suite CR that owns the Service (garbage-collected with it).
     """
     v1 = client.CoreV1Api()
     lbl = labels or {"app": name}
     svc = client.V1Service(
-        metadata=client.V1ObjectMeta(name=name, namespace=namespace, labels=lbl),
+        metadata=client.V1ObjectMeta(
+            name=name, namespace=namespace, labels=lbl,
+            owner_references=[owner_reference(owner)] if owner else None,
+        ),
         spec=client.V1ServiceSpec(
             type="ClusterIP",
             selector={"app": name},
@@ -342,11 +407,56 @@ def wait_for_deployment_ready(name: str, namespace: str, timeout: int = 300):
     raise TimeoutError(f"Deployment {name} not ready within {timeout}s")
 
 
-def delete_deployment(name: str, namespace: str):
+def list_deployments(namespace: str) -> list:
+    """All Deployments in the namespace."""
+    return client.AppsV1Api().list_namespaced_deployment(namespace).items
+
+
+def read_deployment(name: str, namespace: str):
+    """Return the Deployment, or None if it does not exist."""
+    try:
+        return client.AppsV1Api().read_namespaced_deployment(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return None
+        raise
+
+
+def delete_deployment(name: str, namespace: str, wait: bool = False, timeout: int = 300):
+    """
+    Delete a Deployment. wait=True uses foreground deletion and blocks until
+    the Deployment, and so its pods, are gone, which releases their PVCs.
+    """
     apps_v1 = client.AppsV1Api()
     try:
-        apps_v1.delete_namespaced_deployment(name, namespace)
+        apps_v1.delete_namespaced_deployment(
+            name, namespace,
+            body=client.V1DeleteOptions(
+                propagation_policy="Foreground" if wait else "Background"
+            ),
+        )
         logger.info(f"Deleted deployment {name}")
+    except ApiException as e:
+        if e.status != 404:
+            raise
+    if not wait:
+        return
+    deadline = time.time() + timeout
+    while read_deployment(name, namespace) is not None:
+        if time.time() > deadline:
+            raise TimeoutError(f"Deployment {name} not deleted within {timeout}s")
+        time.sleep(3)
+
+
+def list_services(namespace: str) -> list:
+    """All Services in the namespace."""
+    return client.CoreV1Api().list_namespaced_service(namespace).items
+
+
+def delete_service(name: str, namespace: str):
+    try:
+        client.CoreV1Api().delete_namespaced_service(name, namespace)
+        logger.info(f"Deleted service {name}")
     except ApiException as e:
         if e.status != 404:
             raise

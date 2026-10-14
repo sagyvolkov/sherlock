@@ -33,4 +33,3 @@ spec:
         ttlHours: 24
     retention:
       keepLastN: 5
-      deleteWithSuite: false

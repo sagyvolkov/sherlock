@@ -24,9 +24,10 @@ rules:
     verbs: [get, list, create]
 
   # Manage PVCs (create_pvc, wait_for_pvcs_bound, delete_pvc)
+  # patch: prepared-data marker and claim annotations (utils/volumes.py)
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
-    verbs: [get, list, watch, create, delete]
+    verbs: [get, list, watch, create, patch, delete]
 
   # Manage Services (create_service, get_service_cluster_ip)
   - apiGroups: [""]

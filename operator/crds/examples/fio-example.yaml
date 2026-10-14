@@ -57,7 +57,6 @@ spec:
         size: 20Gi
     retention:
       keepLastN: 20
-      deleteWithSuite: false
 
 ---
 # Example 2: fio filesystem mode sweep (NFS or CephFS)
@@ -106,4 +105,3 @@ spec:
         credentialsSecret: sherlock-s3-creds
     retention:
       ttlDays: 60
-      deleteWithSuite: false

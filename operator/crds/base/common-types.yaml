@@ -13,6 +13,13 @@
 #   storageClass:       string (empty = cluster default)
 #   storageSize:        string, e.g. "50Gi"
 #   storagePlugin:      generic | lightbits | odf | portworx
+#   volumes:            (same block in fio's StorageSpec, default prefix "fio")
+#     namePrefix:       string (default: database type) — PVCs <prefix>-pvc-N,
+#                       Deployments/Services <prefix>-N
+#     onSuiteDelete:    retain | delete (default retain; replaces
+#                       artifacts.retention.deleteWithSuite)
+#     onCreate:         reuse | recreate (default reuse — reuse PVCs whose
+#                       prepared-data marker matches the full layout)
 #   partitionedTables:  bool (postgresql/pgbench only, ignored otherwise)
 #   resources:
 #     requests/limits for cpu and memory
@@ -54,4 +61,3 @@
 #   retention:
 #     keepLastN:        int (optional, keep only N most recent bundles)
 #     ttlDays:          int (optional, delete bundles older than N days)
-#     deleteWithSuite:  bool (default false — PVC/bundles survive Suite CR deletion)

@@ -10,7 +10,7 @@ import logging
 import kopf
 
 from src.handlers.base import (
-    initialize_suite, deploy_db_infrastructure,
+    initialize_suite, deploy_db_infrastructure, teardown_db_suite,
     run_next_benchmark,
     BENCHMARK_IMAGE,
     on_benchmark_job_event, on_suite_timer,
@@ -34,13 +34,14 @@ DEFAULT_CREDENTIALS = {
 
 
 @kopf.on.create(GROUP, VERSION, KIND)
-def on_create(name, namespace, spec, patch, **kwargs):
+def on_create(name, namespace, spec, patch, body, **kwargs):
     logger.info(f"[hammerdb] Suite {name} created in {namespace}")
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND)
     secret_name = spec.get("database", {}).get("credentialsSecret")
     db_type = spec.get("database", {}).get("type", "hammerdb")
     credentials = resolve_credentials(db_type, namespace, secret_name)
-    deploy_db_infrastructure(name, namespace, spec, patch, credentials)
+    deploy_db_infrastructure(name, namespace, spec, patch, credentials,
+                             owner=body, suite_kind=KIND)
     patch.status["phase"] = "Ready"
 
 
@@ -76,8 +77,9 @@ def on_timer(name, namespace, status, patch, **kwargs):
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)
-def on_delete(name, namespace, spec, status, **kwargs):
-    logger.info(f"[hammerdb] Suite {name} deleted")
+def on_delete(name, namespace, spec, status, meta, **kwargs):
+    """Database pods go with the suite; PVCs per database.volumes.onSuiteDelete."""
+    teardown_db_suite(name, namespace, spec, status, meta["uid"])
 
 
 def _build_command(params: dict, db_ip: str) -> list[str]:

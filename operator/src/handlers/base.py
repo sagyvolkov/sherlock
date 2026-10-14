@@ -27,7 +27,7 @@ import kopf
 from kubernetes.client.rest import ApiException
 
 from src.utils.matrix import expand, make_run_name, count_runs
-from src.utils import k8s
+from src.utils import k8s, volumes
 from src.utils.artifacts import build_bundle, store_bundle, enforce_retention
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
@@ -134,7 +134,23 @@ def deploy_db_infrastructure(
     spec: dict,
     patch: kopf.Patch,
     db_credentials: dict,
+    owner: dict,
+    suite_kind: str,
 ) -> list[dict]:
+    """
+    Phase: Deploying → Ready
+
+    Deploys database pods and waits for them to be ready.
+    Returns the deployment descriptors with ClusterIPs resolved.
+    Reuses the PVCs (and the data on them) of an earlier suite when the
+    layout matches; status.volumes records which PVCs and whether they were
+    reused. Waits (retries) while a running suite is using the same volumes.
+
+    owner: the suite CR (kopf `body`); it owns the Deployments and Services.
+    Must be called after initialize_suite, whose runMatrix it reads.
+
+    Replaces create_databases + wait logic.
+    """
     # Store credentials in status (non-sensitive fields only — password excluded)
     # Handlers access username/dbName from status; password passed via Secret ref
     patch.status["dbCredentials"] = {
@@ -142,15 +158,10 @@ def deploy_db_infrastructure(
         "dbName":   db_credentials.get("dbName", ""),
         # password intentionally not stored in status — handlers re-resolve from Secret
     }
-    """
-    Phase: Deploying → Ready
-
-    Deploys database pods and waits for them to be ready.
-    Returns the deployment descriptors with ClusterIPs resolved.
-
-    Replaces create_databases + wait logic.
-    """
     db_spec = spec["database"]
+    vol = volumes.settings(db_spec, default_prefix=db_spec["type"])
+    run_matrix = patch.status.get("runMatrix") or []
+    first_params = run_matrix[0]["params"] if run_matrix else {}
     worker_nodes = k8s.get_worker_nodes(
         node_selector=db_spec.get("nodeSelector"),
         count=None,  # all matching nodes
@@ -159,27 +170,56 @@ def deploy_db_infrastructure(
     if not worker_nodes:
         raise kopf.TemporaryError("No worker nodes found", delay=30)
 
-    deployments = deploy_databases(
-        suite_name=name,
-        namespace=namespace,
-        db_type=db_spec["type"],
-        db_username=db_credentials["username"],
-        db_password=db_credentials["password"],
-        db_name=db_credentials["dbName"],
-        storage_class=db_spec.get("storageClass", ""),
-        storage_size=db_spec["storageSize"],
-        instances_per_node=db_spec.get("instancesPerNode", 1),
-        worker_nodes=worker_nodes,
-        resources=db_spec.get("resources", {}),
-        sa_password=db_credentials.get("saPassword"),
-    )
+    try:
+        deployments, volume_status = deploy_databases(
+            suite_name=name,
+            namespace=namespace,
+            db_type=db_spec["type"],
+            db_username=db_credentials["username"],
+            db_password=db_credentials["password"],
+            db_name=db_credentials["dbName"],
+            storage_class=db_spec.get("storageClass", ""),
+            storage_size=db_spec["storageSize"],
+            instances_per_node=db_spec.get("instancesPerNode", 1),
+            worker_nodes=worker_nodes,
+            resources=db_spec.get("resources", {}),
+            owner=owner,
+            suite_kind=suite_kind,
+            name_prefix=vol["namePrefix"],
+            on_create=vol["onCreate"],
+            dataset=volumes.dataset_params(suite_kind, first_params),
+            sa_password=db_credentials.get("saPassword"),
+        )
+    except volumes.VolumesBusy as e:
+        logger.info(f"[{name}] Waiting: {e}")
+        raise kopf.TemporaryError(str(e), delay=60)
 
     deployments = wait_for_databases_ready(deployments, namespace)
     patch.status["phase"] = "Ready"
     patch.status["deployments"] = deployments
+    patch.status["volumes"] = volume_status
 
     logger.info(f"[{name}] {len(deployments)} database instances ready")
     return deployments
+
+
+def teardown_db_suite(name: str, namespace: str, spec: dict, status: dict, uid: str):
+    """
+    Shared body of every database suite's kopf.on.delete handler.
+
+    Deployments and Services go with the suite (ownerReferences). PVCs follow
+    spec.database.volumes.onSuiteDelete: retain (default) keeps them and their
+    prepared data for the next suite, delete removes those this suite claims.
+    """
+    db_spec = spec.get("database", {})
+    vol = volumes.settings(db_spec, default_prefix=db_spec.get("type", ""))
+    teardown_databases(
+        namespace=namespace,
+        owner_uid=uid,
+        volume_status=(status or {}).get("volumes") or {},
+        on_suite_delete=vol["onSuiteDelete"],
+    )
+    logger.info(f"[{name}] Suite deleted (volumes: {vol['onSuiteDelete']})")
 
 
 def run_next_benchmark(
@@ -193,7 +233,7 @@ def run_next_benchmark(
     benchmark_image: str = BENCHMARK_IMAGE,
     suite_kind: str = "",
     build_prepare_command: Optional[
-        Callable[[dict, Optional[dict], str], Optional[list[str]]]
+        Callable[[dict, str], list[str]]
     ] = None,
     owner: Optional[dict] = None,
 ):
@@ -205,10 +245,11 @@ def run_next_benchmark(
 
     build_benchmark_command(params, db_ip) → list of strings (the container command)
     parse_results(raw_log, params) → dict of result metrics
-    build_prepare_command(params, prev_params, db_ip) → container command that
-      loads the benchmark data (the "prepare" job type in
-      run_database_workload-parallel), or None if the data left by the
-      previous run (prev_params, None for the first run) can be reused.
+    build_prepare_command(params, db_ip) → container command that loads the
+      benchmark data (the "prepare" job type in run_database_workload-parallel).
+      It is skipped when the PVCs' prepared-data markers show they already
+      hold data for this run's layout and dataset params (utils/volumes.py),
+      whether that data came from an earlier run or an earlier suite.
     owner → the suite CR (kopf `body`). Every Job gets an ownerReference to
       it, so Jobs are deleted with the suite and stale Jobs from an earlier
       suite with the same name can be told apart. Its UID also goes into
@@ -252,7 +293,7 @@ def run_next_benchmark(
             run_name=run_name,
             deployments=deployments,
             params=params,
-            prev_params=_previous_run_params(run_matrix, run_name),
+            volume_status=status.get("volumes") or {},
             build_prepare_command=build_prepare_command,
             benchmark_image=benchmark_image,
             suite_kind=suite_kind,
@@ -474,10 +515,8 @@ def complete_run_if_done(
         states = {j: k8s.get_job_state(j, namespace) for j in job_names}
         active = [j for j, s in states.items() if s == "Active"]
         if active:
-            logger.info(
-                f"[{suite_name}] Run {run['name']}: "
-                f"{len(job_names) - len(active)}/{len(job_names)} benchmark Jobs done"
-            )
+            _log_progress(suite_name, run["name"],
+                          len(job_names) - len(active), len(job_names))
             return False
 
         try:
@@ -492,6 +531,7 @@ def complete_run_if_done(
             raise
 
         # This caller owns the run from here on.
+        _last_progress.pop((suite_name, run["name"]), None)
         patch = _SuitePatch(plural=plural)
         try:
             handle_run_completion(
@@ -515,6 +555,18 @@ def complete_run_if_done(
         f"{CLAIM_ATTEMPTS} attempts; the suite timer will retry"
     )
     return False
+
+
+# Last "N/M benchmark Jobs done" count logged per (suite, run), so the timer
+# only logs at INFO when the count changes instead of every 10s.
+_last_progress: dict = {}
+
+
+def _log_progress(suite_name: str, run_name: str, done: int, total: int):
+    key = (suite_name, run_name)
+    level = logging.DEBUG if _last_progress.get(key) == done else logging.INFO
+    _last_progress[key] = done
+    logger.log(level, f"[{suite_name}] Run {run_name}: {done}/{total} benchmark Jobs done")
 
 
 def handle_run_completion(
@@ -691,17 +743,6 @@ def _advance(suite_name, spec, status, patch):
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _previous_run_params(run_matrix: list, run_name: str) -> Optional[dict]:
-    """Return the params of the last finished run before run_name, if any."""
-    prev = None
-    for run in run_matrix:
-        if run["name"] == run_name:
-            break
-        if run["phase"] in ("Completed", "Failed"):
-            prev = run.get("params", {})
-    return prev
-
-
 def _prepare_databases(
     suite_name: str,
     namespace: str,
@@ -709,8 +750,8 @@ def _prepare_databases(
     run_name: str,
     deployments: list[dict],
     params: dict,
-    prev_params: Optional[dict],
-    build_prepare_command: Callable[[dict, Optional[dict], str], Optional[list[str]]],
+    volume_status: dict,
+    build_prepare_command: Callable[[dict, str], list[str]],
     benchmark_image: str,
     suite_kind: str,
     owner: Optional[dict] = None,
@@ -720,13 +761,30 @@ def _prepare_databases(
     Launch one prepare Job per database instance and block until all finish.
     Returns False if any prepare Job failed or timed out.
 
+    Skipped when every PVC's marker already matches this run's layout. The
+    markers are cleared before the Jobs start and written once all succeed,
+    so an interrupted or failed prepare never leaves a valid-looking marker.
+    Suites without status.volumes (created before volume reuse) always
+    prepare and never mark.
+
     Replaces the `-j prepare` invocation of run_database_workload-parallel.
     """
+    pvc_names = [d["pvc"] for d in deployments if d.get("pvc")]
+    layout = None
+    if volume_status.get("layout"):
+        layout = {**volume_status["layout"],
+                  "dataset": volumes.dataset_params(suite_kind, params)}
+        if volumes.is_prepared(namespace, pvc_names, layout):
+            logger.info(
+                f"[{suite_name}] Skipping prepare for {run_name}: volumes "
+                f"already hold {layout['dataset']}"
+            )
+            return True
+        volumes.clear_marker(namespace, pvc_names)
+
     prepare_jobs = []
     for dep in deployments:
-        command = build_prepare_command(params, prev_params, dep.get("ip", ""))
-        if command is None:
-            continue
+        command = build_prepare_command(params, dep.get("ip", ""))
         # Unique per suite instance, run and attempt, so a leftover Job is
         # never picked up by create_job's 409 path
         job_name = k8s.job_name(
@@ -749,9 +807,6 @@ def _prepare_databases(
             active_deadline_seconds=PREPARE_TIMEOUT_SECS,
         )
         prepare_jobs.append(job_name)
-
-    if not prepare_jobs:
-        return True
 
     logger.info(
         f"[{suite_name}] Preparing data for {run_name}: {len(prepare_jobs)} jobs"
@@ -779,6 +834,8 @@ def _prepare_databases(
             return False
         time.sleep(5)
 
+    if layout is not None:
+        volumes.mark_prepared(namespace, pvc_names, layout)
     logger.info(f"[{suite_name}] Data prepared for {run_name}")
     return True
 

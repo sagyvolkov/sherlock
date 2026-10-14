@@ -298,3 +298,23 @@ def test_update_run_phase_keeps_earlier_writes():
     run = patch.status["runMatrix"][0]
     assert run["startTime"] == "T0"
     assert run["benchmarkJobs"] == ["j"]
+
+
+def test_progress_logged_at_info_only_when_count_changes(cluster, caplog):
+    c = cluster()
+    base._last_progress.clear()
+    caplog.set_level("DEBUG", logger=base.logger.name)
+
+    def info_lines():
+        return [r for r in caplog.records
+                if r.levelname == "INFO" and "benchmark Jobs done" in r.getMessage()]
+
+    for _ in range(3):
+        base.complete_run_if_done(plural=PLURAL, suite_name="smoke", namespace="sherlock",
+                                  parse_results=parse_pgbench)
+    assert len(info_lines()) == 1
+    c.job_states[JOBS[0]] = "Complete"
+    base.complete_run_if_done(plural=PLURAL, suite_name="smoke", namespace="sherlock",
+                              parse_results=parse_pgbench)
+    assert "1/3" in info_lines()[-1].getMessage()
+    assert len(info_lines()) == 2

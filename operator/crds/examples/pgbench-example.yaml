@@ -16,6 +16,10 @@ spec:
     credentialsSecret: sherlock-pg-creds
     storagePlugin: generic
     partitionedTables: false
+    volumes:
+      namePrefix: postgresql   # PVCs postgresql-pvc-N, pods postgresql-N
+      onSuiteDelete: retain    # keep the loaded data for the next suite
+      onCreate: reuse          # skip pgbench -i if the PVCs already match
   execution:
     order: sequential
     sleepBetweenRuns: 30
@@ -40,4 +44,3 @@ spec:
         credentialsSecret: sherlock-s3-creds
     retention:
       ttlDays: 90
-      deleteWithSuite: false

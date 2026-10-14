@@ -14,9 +14,10 @@ Supported databases: postgresql, mysql, mssql, mongodb
 """
 
 import logging
+import re
 from typing import Optional
 
-from src.utils import k8s
+from src.utils import k8s, volumes
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,13 @@ def deploy_databases(
     instances_per_node: int,
     worker_nodes: list[str],
     resources: dict,
+    owner: dict,
+    suite_kind: str,
+    name_prefix: Optional[str] = None,
+    on_create: str = "reuse",
+    dataset: Optional[dict] = None,
     sa_password: Optional[str] = None,   # MSSQL only
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """
     Deploy all database instances for a Suite run.
 
@@ -68,9 +74,17 @@ def deploy_databases(
         node_number = j % NUMBER_OF_WORKERS
         node_name = worker_node_array[node_number]
 
-    Returns a list of deployment descriptors:
-        [{"name": "postgresql-0", "node": "worker1", "pvc": "postgresql-pvc-0",
-          "ip": "10.0.0.1", "index": 0}, ...]
+    Deployments, Services and PVCs are named after name_prefix (default: the
+    database type), not the suite, so a later suite can reuse the PVCs and
+    the data prepared on them; see utils/volumes.py. dataset is the dataset
+    params of the first run, part of the layout the PVCs must match.
+    Deployments and Services are owned by the suite (owner); PVCs are not.
+
+    Returns (deployments, volumes):
+        deployments: [{"name": "postgresql-0", "node": "worker1",
+                       "pvc": "postgresql-pvc-0", "index": 0}, ...]
+        volumes: {"namePrefix", "pvcNames", "layout", "reused"}
+    Raises volumes.VolumesBusy if a running suite is using the same prefix.
     """
     if db_type not in DB_IMAGES:
         raise ValueError(f"Unsupported database type: {db_type}. "
@@ -79,8 +93,23 @@ def deploy_databases(
     k8s.ensure_namespace(namespace)
 
     total = instances_per_node * len(worker_nodes)
-    prefix = f"{suite_name}-{db_type}"
-    pvc_prefix = f"{prefix}-pvc"
+    prefix = name_prefix or db_type
+    layout = volumes.make_layout(
+        suite_kind=suite_kind,
+        total=total,
+        instances_per_node=instances_per_node,
+        workers=len(worker_nodes),
+        storage_class=storage_class,
+        storage_size=storage_size,
+        dataset=dataset,
+        database={
+            "type":     db_type,
+            "image":    DB_IMAGES[db_type],
+            "username": db_username,
+            "password": sa_password if db_type == "mssql" else db_password,
+            "dbName":   db_name,
+        },
+    )
 
     # ── Pre-flight: database-specific ConfigMaps / Secrets ───────────────────
     if db_type == "mysql":
@@ -92,27 +121,20 @@ def deploy_databases(
             raise ValueError("sa_password is required for mssql deployments")
         k8s.create_secret("sqlserver", namespace, {"SA_PASSWORD": sa_password})
 
-    # ── Create all PVCs first ─────────────────────────────────────────────────
-    # Matches the original create_all_pvc() pattern:
-    #   for j in 0..DB_PER_WORKER*NUMBER_OF_WORKERS-1: create_pvc
-    pvc_names = []
-    for j in range(total):
-        pvc_name = f"{pvc_prefix}-{j}"
-        labels = {
-            "sherlock.io/suite": suite_name,
-            "sherlock.io/role": "database-pvc",
-            "sherlock.io/db-index": str(j),
-        }
-        k8s.create_pvc(
-            name=pvc_name,
-            namespace=namespace,
-            storage_size=storage_size,
-            storage_class=storage_class,
-            labels=labels,
-        )
-        pvc_names.append(pvc_name)
-
-    k8s.wait_for_pvcs_bound(namespace, pvc_names, timeout=600)
+    # ── Volumes ───────────────────────────────────────────────────────────────
+    # Database pods left by an earlier suite (or an earlier attempt of this
+    # handler) still mount the PVCs; remove them before the PVCs are reused
+    # or deleted.
+    volumes.check_available(prefix, namespace, owner)
+    _remove_databases(prefix, namespace)
+    pvc_names, reused = volumes.ensure_volume_set(
+        prefix=prefix,
+        namespace=namespace,
+        layout=layout,
+        owner=owner,
+        on_create=on_create,
+        labels={"sherlock.io/suite": suite_name, "sherlock.io/role": "database-pvc"},
+    )
 
     # ── Deploy database pods ──────────────────────────────────────────────────
     deployments = []
@@ -120,7 +142,7 @@ def deploy_databases(
         node_index = j % len(worker_nodes)
         node_name = worker_nodes[node_index]
         pod_name = f"{prefix}-{j}"
-        pvc_name = f"{pvc_prefix}-{j}"
+        pvc_name = pvc_names[j]
 
         env_vars = _build_env_vars(db_type, db_username, db_password, db_name, sa_password)
 
@@ -141,6 +163,7 @@ def deploy_databases(
                 "sherlock.io/db-type": db_type,
                 "sherlock.io/db-index": str(j),
             },
+            owner=owner,
         )
 
         k8s.create_service(
@@ -148,6 +171,7 @@ def deploy_databases(
             namespace=namespace,
             port=DB_PORTS[db_type],
             labels={"sherlock.io/suite": suite_name},
+            owner=owner,
         )
 
         deployments.append({
@@ -158,7 +182,13 @@ def deploy_databases(
         })
         logger.info(f"Deployed {db_type} instance {j} on {node_name}")
 
-    return deployments
+    volume_status = {
+        "namePrefix": prefix,
+        "pvcNames":   pvc_names,
+        "layout":     layout,
+        "reused":     reused,
+    }
+    return deployments, volume_status
 
 
 def wait_for_databases_ready(
@@ -182,36 +212,47 @@ def wait_for_databases_ready(
 
 
 def teardown_databases(
-    suite_name: str,
     namespace: str,
-    db_type: str,
-    total_instances: int,
-    delete_pvcs: bool = False,
+    owner_uid: str,
+    volume_status: dict,
+    on_suite_delete: str = "retain",
 ):
     """
-    Delete database Deployments, Services, and optionally PVCs.
-    Replaces delete_databases bash script.
+    Called when a suite is deleted. Replaces delete_databases bash script.
 
-    delete_pvcs: defaults False because data on PVCs may still be needed
-    for result archiving. Set True only when fully cleaning up a Suite.
+    The suite's Deployments and Services are garbage-collected through their
+    ownerReferences. PVCs are kept (on_suite_delete=retain) so a later suite
+    can reuse the prepared data, or deleted (delete) if this suite is still
+    the one that claims them.
     """
-    prefix = f"{suite_name}-{db_type}"
-    for j in range(total_instances):
-        pod_name = f"{prefix}-{j}"
-        pvc_name = f"{prefix}-pvc-{j}"
-        k8s.delete_deployment(pod_name, namespace)
-        # Service deletion — use CoreV1Api directly
-        try:
-            v1 = __import__("kubernetes").client.CoreV1Api()
-            v1.delete_namespaced_service(pod_name, namespace)
-            logger.info(f"Deleted service {pod_name}")
-        except Exception:
-            pass
-        if delete_pvcs:
-            k8s.delete_pvc(pvc_name, namespace)
+    prefix = (volume_status or {}).get("namePrefix")
+    if not prefix or on_suite_delete != "delete":
+        return
+    deleted = volumes.delete_claimed(prefix, namespace, owner_uid)
+    logger.info(f"Deleted {len(deleted)} PVCs of volume set {prefix}")
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+def _remove_databases(prefix: str, namespace: str):
+    """
+    Delete all Deployments and Services named <prefix>-<n> and wait until
+    their pods are gone, so the PVCs are free to be reused or deleted.
+
+    They belong to an earlier suite that has finished (check_available ran
+    first) or to an earlier attempt of this suite's create handler. Taking
+    over another suite's objects is not an option: their ownerReference
+    would delete them when that suite is deleted.
+    """
+    pattern = re.compile(rf"^{re.escape(prefix)}-\d+$")
+    for svc in k8s.list_services(namespace):
+        if pattern.match(svc.metadata.name):
+            k8s.delete_service(svc.metadata.name, namespace)
+    for dep in k8s.list_deployments(namespace):
+        if pattern.match(dep.metadata.name):
+            logger.info(f"Removing existing database {dep.metadata.name}")
+            k8s.delete_deployment(dep.metadata.name, namespace, wait=True)
+
 
 def _build_env_vars(
     db_type: str,
