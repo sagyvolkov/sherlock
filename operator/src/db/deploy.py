@@ -44,6 +44,14 @@ DB_CONFIG_MOUNTS = {
     "mysql": [{"configmap": "mysql-custom-config", "mount_path": "/etc/mysql/conf.d"}],
 }
 
+# Capabilities each database container needs. restricted-v2 drops all and
+# allows adding only NET_BIND_SERVICE.
+DB_CAPABILITIES = {
+    # /opt/mssql/bin/sqlservr has a file capability; exec fails with
+    # "Operation not permitted" (exit 126) without it
+    "mssql": ["NET_BIND_SERVICE"],
+}
+
 DB_DATA_PATHS = {
     "postgresql": "/var/lib/postgresql/data",
     "mysql":      "/var/lib/mysql",
@@ -163,6 +171,7 @@ def deploy_databases(
             port=DB_PORTS[db_type],
             resources=resources,
             config_mounts=DB_CONFIG_MOUNTS.get(db_type),
+            add_capabilities=DB_CAPABILITIES.get(db_type),
             labels={
                 "app": pod_name,
                 "sherlock.io/suite": suite_name,

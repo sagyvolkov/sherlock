@@ -152,12 +152,21 @@ def parse_sysbench(raw: str, params: dict) -> dict:
 
 # ── HammerDB ──────────────────────────────────────────────────────────────────
 
+_HAMMERDB_3_RE = re.compile(
+    r'System achieved\s+([\d,]+)\s+.+?\s+TPM\s+at\s+([\d,]+)\s+NOPM'
+)
+_HAMMERDB_4_RE = re.compile(
+    r'System achieved\s+([\d,]+)\s+NOPM\s+from\s+([\d,]+)\s+.+?\s+TPM'
+)
+
+
 def parse_hammerdb(raw: str, params: dict) -> dict:
     """
     Parse HammerDB TPC-C output.
 
-    HammerDB prints a result line like:
-      System achieved 45231 NOPM from 125678 SQL Server TPM
+    HammerDB prints one result line per run, in one of two formats:
+      3.x: TEST RESULT : System achieved 125678 SQL Server TPM at 45231 NOPM
+      4.x: TEST RESULT : System achieved 45231 NOPM from 125678 SQL Server TPM
 
     Replaces print_hammerdb_results_per_single_run() which used:
       grep 'System achieved' ${run_dir}/${BENCHMARK_TOOL}-*.log
@@ -165,11 +174,9 @@ def parse_hammerdb(raw: str, params: dict) -> dict:
     """
     text = _clean(raw)
 
-    # Find all "System achieved N NOPM from M SQL Server TPM" lines
-    HAMMERDB_RE = re.compile(
-        r'System achieved\s+([\d,]+)\s+NOPM\s+from\s+([\d,]+)\s+.+?\s+TPM'
-    )
-    matches = HAMMERDB_RE.findall(text)
+    # (nopm, tpm) pairs from either format
+    matches = [(m[1], m[0]) for m in _HAMMERDB_3_RE.findall(text)]
+    matches += _HAMMERDB_4_RE.findall(text)
 
     if not matches:
         logger.warning("hammerdb parser: no 'System achieved' line found")

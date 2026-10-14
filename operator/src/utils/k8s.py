@@ -248,6 +248,7 @@ def create_deployment(
     labels: Optional[dict] = None,
     owner: Optional[dict] = None,
     config_mounts: Optional[list[dict]] = None,
+    add_capabilities: Optional[list[str]] = None,
 ) -> client.V1Deployment:
     """
     Create a single-replica Deployment for a database pod.
@@ -260,6 +261,9 @@ def create_deployment(
     owner: suite CR that owns the Deployment, which is then garbage-collected
     with the suite. Its PVC is not owned and outlives both.
     config_mounts: [{"configmap": name, "mount_path": dir}] mounted read-only.
+    add_capabilities: Linux capabilities the container needs (e.g. MSSQL's
+      sqlservr binary carries cap_net_bind_service and cannot be executed
+      without NET_BIND_SERVICE under OpenShift's restricted-v2 SCC).
 
     The pod is Ready only once the database accepts TCP connections on
     `port`. Database images initialise a new data directory with a
@@ -303,6 +307,9 @@ def create_deployment(
                                  read_only=True)
             for i, m in enumerate(config_mounts or [])
         ],
+        security_context=client.V1SecurityContext(
+            capabilities=client.V1Capabilities(add=add_capabilities),
+        ) if add_capabilities else None,
         readiness_probe=client.V1Probe(
             tcp_socket=client.V1TCPSocketAction(port=port),
             initial_delay_seconds=5,
@@ -890,6 +897,7 @@ def create_secret(
         return v1.create_namespaced_secret(namespace, secret)
     except ApiException as e:
         if e.status == 409:
-            logger.debug(f"Secret {name} already exists")
-            return v1.read_namespaced_secret(name, namespace)
+            # Replace, so a changed password (e.g. MSSQL sa) takes effect
+            logger.debug(f"Secret {name} already exists, replacing")
+            return v1.replace_namespaced_secret(name, namespace, secret)
         raise

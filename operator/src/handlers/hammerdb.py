@@ -7,6 +7,9 @@ All orchestration is in handlers/base.py.
 """
 
 import logging
+import re
+import shlex
+
 import kopf
 
 from src.handlers.base import (
@@ -25,20 +28,23 @@ VERSION = "v1alpha1"
 KIND = "SherlockHammerDBSuite"
 PLURAL  = "sherlockhammerdbsuites"
 
-DEFAULT_CREDENTIALS = {
-    "username": "sa",
-    "password": "Sherlock1!",   # SA password; must meet MSSQL complexity requirements
-    "dbName":   "tpcc",
-    "saPassword": "Sherlock1!",
-}
+# Virtual users that load warehouses in parallel during the schema build
+BUILD_VIRTUAL_USERS = 8
+
+SQLCMD = "/opt/mssql-tools/bin/sqlcmd"
 
 
 @kopf.on.create(GROUP, VERSION, KIND)
 def on_create(name, namespace, spec, patch, body, **kwargs):
     logger.info(f"[hammerdb] Suite {name} created in {namespace}")
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND)
+    db_type = spec.get("database", {}).get("type", "mssql")
+    if db_type != "mssql":
+        # The CRD allows mysql, but only the MSSQL TPC-C scripts exist so far
+        logger.error(f"[hammerdb] {name}: HammerDB on {db_type} is not implemented")
+        patch.status["phase"] = "Failed"
+        return
     secret_name = spec.get("database", {}).get("credentialsSecret")
-    db_type = spec.get("database", {}).get("type", "hammerdb")
     credentials = resolve_credentials(db_type, namespace, secret_name)
     deploy_db_infrastructure(name, namespace, spec, patch, credentials,
                              owner=body, suite_kind=KIND)
@@ -54,6 +60,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
             parse_results=parse_hammerdb, benchmark_image=BENCHMARK_IMAGE,
             suite_kind=KIND,
             owner=body,
+            build_prepare_command=_build_prepare_command,
         )
 
 
@@ -84,17 +91,109 @@ def on_delete(name, namespace, spec, status, meta, **kwargs):
 
 def _build_command(params: dict, db_ip: str) -> list[str]:
     """
-    Map HammerDB sweep params to run_hammerdb script args.
-    run_hammerdb mssqls run <db_ip> <sa_pass> <warehouses> <vusers>
-                        <output_interval> <rampup_mins> <test_mins> <raise_error>
+    Run the timed TPC-C driver: rampupMins of warm-up, then testMins measured.
+
+    The TCL is generated here rather than from the image's run.template,
+    which hardcoded the database name and ignored allWarehouses.
     """
-    vu        = params.get("virtualUsers", 8)
-    warehouses = params.get("warehouses", 100)
     rampup    = params.get("rampupMins", 2)
     test_mins = params.get("testMins", 5)
-    sa_pass   = DEFAULT_CREDENTIALS["saPassword"]
-    cmd = (
-        f"./run_hammerdb mssqls run {db_ip} {sa_pass} "
-        f"{warehouses} {vu} 10 {rampup} {test_mins} false"
-    )
-    return ["bash", "-c", cmd]
+    # Back-stop in case the timed driver never reports completion
+    timer_secs = (rampup + test_mins) * 60 + 180
+    tcl = _connection_tcl(params, db_ip) + f"""
+diset tpcc mssqls_dbase {_tcl_quote(params.get('_dbName', 'tpcc'))}
+diset tpcc mssqls_driver timed
+diset tpcc mssqls_rampup {rampup}
+diset tpcc mssqls_duration {test_mins}
+diset tpcc mssqls_allwarehouse {_tcl_bool(params.get('allWarehouses', False))}
+diset tpcc mssqls_timeprofile false
+diset tpcc mssqls_raiseerror false
+vuset logtotemp 1
+loadscript
+vuset vu {params.get('virtualUsers', 8)}
+vucreate
+vurun
+set x 0
+while {{![vucomplete] && $x < {timer_secs}}} {{
+  incr x
+  after 1000
+  update
+  if {{$x % 60 == 0}} {{ puts "Elapsed ${{x}}s" }}
+}}
+vudestroy
+after 5000
+puts "Run completes..."
+"""
+    return ["bash", "-c", _run_tcl_script(tcl)]
+
+
+def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
+    """
+    Build the TPC-C schema for this run's warehouse count.
+
+    HammerDB refuses to build into a database that already has tables, so
+    the database is dropped first. hammerdbcli exits 0 even when the build
+    fails, so the warehouse count is checked afterwards.
+    base skips all of this when the volumes already hold the warehouses.
+    """
+    warehouses = params.get("warehouses", 100)
+    db_name = params.get("_dbName", "tpcc")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", db_name):
+        raise ValueError(f"Unsupported MSSQL database name {db_name!r}")
+    tcl = _connection_tcl(params, db_ip) + f"""
+diset tpcc mssqls_dbase {_tcl_quote(db_name)}
+diset tpcc mssqls_count_ware {warehouses}
+diset tpcc mssqls_num_vu {min(warehouses, BUILD_VIRTUAL_USERS)}
+buildschema
+while {{![vucomplete]}} {{ after 5000; update }}
+"""
+    sqlcmd = (f"{SQLCMD} -b -S {shlex.quote(db_ip + ',1433')} -U sa "
+              f"-P {shlex.quote(params['_saPassword'])}")
+    drop = (f"IF DB_ID('{db_name}') IS NOT NULL BEGIN "
+            f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
+            f"DROP DATABASE [{db_name}]; END")
+    script = f"""set -euo pipefail
+# SQL Server accepts TCP before it accepts logins; wait for a login to work
+for i in $(seq 1 60); do
+  {sqlcmd} -Q "SELECT 1" >/dev/null 2>&1 && break
+  echo "waiting for SQL Server ($i)"; sleep 5
+done
+{sqlcmd} -Q {shlex.quote(drop)}
+{_run_tcl_script(tcl)}
+count=$({sqlcmd} -d {db_name} -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.warehouse" | tr -d '[:space:]')
+if [ "$count" != "{warehouses}" ]; then
+  echo "SCHEMA BUILD FAILED: expected {warehouses} warehouses, found '$count'"
+  exit 1
+fi
+echo "SCHEMA VERIFIED: {warehouses} warehouses"
+"""
+    return ["bash", "-c", script]
+
+
+def _connection_tcl(params: dict, db_ip: str) -> str:
+    """HammerDB settings to reach SQL Server on Linux as sa over TCP."""
+    return f"""dbset db mssqls
+dbset bm TPC-C
+diset connection mssqls_tcp true
+diset connection mssqls_server {_tcl_quote(db_ip)}
+diset connection mssqls_linux_server {_tcl_quote(db_ip)}
+diset connection mssqls_port 1433
+diset connection mssqls_linux_authent sql
+diset connection mssqls_uid sa
+diset connection mssqls_pass {_tcl_quote(params['_saPassword'])}"""
+
+
+def _run_tcl_script(tcl: str) -> str:
+    """Shell lines that write tcl to a file and run it with hammerdbcli."""
+    return ("cat > /tmp/sherlock.tcl <<'SHERLOCK_TCL'\n"
+            f"{tcl}\nSHERLOCK_TCL\n"
+            "cd /hammerdb && ./hammerdbcli auto /tmp/sherlock.tcl")
+
+
+def _tcl_quote(value) -> str:
+    """Quote a value as one TCL word, with no substitution."""
+    return '"' + re.sub(r'([\\"$\[\]{}])', r'\\\1', str(value)) + '"'
+
+
+def _tcl_bool(value) -> str:
+    return "true" if value else "false"

@@ -68,7 +68,8 @@ class TestCommandParams:
         spec = {"database": {"type": "mysql", "credentialsSecret": "my-creds"}}
         out = base._command_params(spec, "sherlock", params)
         assert out == {"threads": 4, "_dbType": "mysql",
-                       "_username": "u", "_password": "p", "_dbName": "d"}
+                       "_username": "u", "_password": "p", "_dbName": "d",
+                       "_saPassword": ""}
         assert params == {"threads": 4}
         assert seen == {"db_type": "mysql", "secret": "my-creds"}
 

@@ -42,7 +42,7 @@ rules:
   # Manage Secrets (MSSQL SA password, S3 credentials)
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get, list, create]
+    verbs: [get, list, create, update]
 
   # Read Pod logs (get_job_pod_logs)
   - apiGroups: [""]

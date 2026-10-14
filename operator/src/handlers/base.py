@@ -767,6 +767,8 @@ def _command_params(spec: dict, namespace: str, params: dict) -> dict:
         "_username": creds["username"],
         "_password": creds["password"],
         "_dbName":   creds["dbName"],
+        # MSSQL only: HammerDB connects as sa
+        "_saPassword": creds.get("saPassword", ""),
     }
 
 
@@ -936,7 +938,8 @@ def _get_runtime_secs(params: dict, spec: dict) -> int:
         if key in params:
             val = params[key]
             if key == "testMins":
-                return int(val) * 60
+                # HammerDB measures after the ramp-up; collect stats for both
+                return (int(val) + int(params.get("rampupMins", 0))) * 60
             return int(val)
     return 120  # fallback
 
