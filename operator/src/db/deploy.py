@@ -38,6 +38,12 @@ DB_PORTS = {
     "mongodb":    27017,
 }
 
+# ConfigMaps mounted into the database pods
+DB_CONFIG_MOUNTS = {
+    # mysql:8.0 reads /etc/my.cnf, which includes /etc/mysql/conf.d/*.cnf
+    "mysql": [{"configmap": "mysql-custom-config", "mount_path": "/etc/mysql/conf.d"}],
+}
+
 DB_DATA_PATHS = {
     "postgresql": "/var/lib/postgresql/data",
     "mysql":      "/var/lib/mysql",
@@ -156,6 +162,7 @@ def deploy_databases(
             env_vars=env_vars,
             port=DB_PORTS[db_type],
             resources=resources,
+            config_mounts=DB_CONFIG_MOUNTS.get(db_type),
             labels={
                 "app": pod_name,
                 "sherlock.io/suite": suite_name,

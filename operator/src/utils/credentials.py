@@ -106,15 +106,10 @@ def _read_secret(name: str, namespace: str, db_type: str) -> dict:
             )
         raise
 
-    # Secret data is base64-encoded; kubernetes client returns it as bytes
-    raw = secret.data or {}
-    decoded = {}
-    for k, v in raw.items():
-        if isinstance(v, bytes):
-            decoded[k] = base64.b64decode(v).decode("utf-8")
-        else:
-            # Already decoded (stringData path)
-            decoded[k] = v
+    # Secret .data values are always base64 strings in the API response
+    # (stringData is folded into data on write)
+    decoded = {k: base64.b64decode(v).decode("utf-8")
+               for k, v in (secret.data or {}).items()}
 
     # Validate required keys
     required = ["username", "password", "dbName"]

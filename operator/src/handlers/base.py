@@ -37,6 +37,7 @@ from src.plugins.storage.generic import (
 )
 from src.parsers.base import parse_storage_stats
 from src.parsers.aggregate import aggregate_results
+from src.utils.credentials import resolve as resolve_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,9 @@ def run_next_benchmark(
     Replaces the main loop in run_database_workload-parallel.
 
     build_benchmark_command(params, db_ip) → list of strings (the container command)
+      params also carries the database credentials and type as _username,
+      _password, _dbName, _dbType (read from the credentials Secret for each
+      run, never stored in status).
     parse_results(raw_log, params) → dict of result metrics
     build_prepare_command(params, db_ip) → container command that loads the
       benchmark data (the "prepare" job type in run_database_workload-parallel).
@@ -269,7 +273,7 @@ def run_next_benchmark(
         return
 
     run_name = next_run["name"]
-    params   = next_run["params"]
+    params   = _command_params(spec, namespace, next_run["params"])
     suite_uid = ((owner or {}).get("metadata") or {}).get("uid", "")
     # Unique per suite instance, run and retry attempt
     run_key  = f"{suite_uid}/{run_name}/{next_run.get('retryCount', 0)}"
@@ -751,6 +755,20 @@ def _advance(suite_name, spec, status, patch):
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+def _command_params(spec: dict, namespace: str, params: dict) -> dict:
+    """Run params plus the database credentials and type for building commands."""
+    db_spec = spec.get("database") or {}
+    db_type = db_spec.get("type", "postgresql")
+    creds = resolve_credentials(db_type, namespace, db_spec.get("credentialsSecret"))
+    return {
+        **params,
+        "_dbType":   db_type,
+        "_username": creds["username"],
+        "_password": creds["password"],
+        "_dbName":   creds["dbName"],
+    }
+
 
 def _prepare_databases(
     suite_name: str,

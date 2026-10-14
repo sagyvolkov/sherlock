@@ -247,6 +247,7 @@ def create_deployment(
     resources: dict,
     labels: Optional[dict] = None,
     owner: Optional[dict] = None,
+    config_mounts: Optional[list[dict]] = None,
 ) -> client.V1Deployment:
     """
     Create a single-replica Deployment for a database pod.
@@ -258,6 +259,12 @@ def create_deployment(
 
     owner: suite CR that owns the Deployment, which is then garbage-collected
     with the suite. Its PVC is not owned and outlives both.
+    config_mounts: [{"configmap": name, "mount_path": dir}] mounted read-only.
+
+    The pod is Ready only once the database accepts TCP connections on
+    `port`. Database images initialise a new data directory with a
+    temporary server that does not listen on TCP (MySQL takes 20-60s), so
+    without the probe the first prepare Job could start too early.
     """
     apps_v1 = client.AppsV1Api()
 
@@ -291,7 +298,17 @@ def create_deployment(
             client.V1VolumeMount(
                 name="data", mount_path=mount_path
             )
+        ] + [
+            client.V1VolumeMount(name=f"config-{i}", mount_path=m["mount_path"],
+                                 read_only=True)
+            for i, m in enumerate(config_mounts or [])
         ],
+        readiness_probe=client.V1Probe(
+            tcp_socket=client.V1TCPSocketAction(port=port),
+            initial_delay_seconds=5,
+            period_seconds=5,
+            failure_threshold=3,
+        ),
         resources=client.V1ResourceRequirements(
             requests={
                 "cpu":    resources.get("requests", {}).get("cpu", "1"),
@@ -315,6 +332,12 @@ def create_deployment(
                     claim_name=pvc_name
                 )
             )
+        ] + [
+            client.V1Volume(
+                name=f"config-{i}",
+                config_map=client.V1ConfigMapVolumeSource(name=m["configmap"]),
+            )
+            for i, m in enumerate(config_mounts or [])
         ],
     )
 

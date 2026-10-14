@@ -7,6 +7,8 @@ All orchestration is in handlers/base.py.
 """
 
 import logging
+import shlex
+
 import kopf
 
 from src.handlers.base import (
@@ -25,11 +27,11 @@ VERSION = "v1alpha1"
 KIND = "SherlockSysbenchSuite"
 PLURAL  = "sherlocksysbenchsuites"
 
-DEFAULT_CREDENTIALS = {
-    "username": "sherlock",
-    "password": "sherlock",
-    "dbName":   "sherlock",
-}
+# sysbench --db-driver and server port per database type
+_DRIVERS = {"mysql": ("mysql", 3306), "postgresql": ("pgsql", 5432)}
+
+# Threads used to load tables in parallel (sysbench loads one table per thread)
+PREPARE_THREADS = 8
 
 
 @kopf.on.create(GROUP, VERSION, KIND)
@@ -53,6 +55,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
             parse_results=parse_sysbench, benchmark_image=BENCHMARK_IMAGE,
             suite_kind=KIND,
             owner=body,
+            build_prepare_command=_build_prepare_command,
         )
 
 
@@ -83,22 +86,47 @@ def on_delete(name, namespace, spec, status, meta, **kwargs):
 
 def _build_command(params: dict, db_ip: str) -> list[str]:
     """
-    Map sysbench sweep params to run_sysbench script args.
-    run_sysbench <job_type> <runtime> <threads> <read_only> <write_only>
-                 <db_ip> <output_interval> <rows> <tables> <db_type>
-                 <username> <password> <dbname> <inserts> <updates> <non_idx_updates>
+    sysbench <testType> ... run
+
+    Built here rather than through the image's run_sysbench script, which
+    always runs oltp_read_write.lua on MySQL (testType was ignored) and
+    passes --mysql-ignore-errors=all, hiding every SQL error. sysbench's
+    default ignore list (deadlocks and lock wait timeouts) applies instead.
     """
-    threads   = params.get("threads", 4)
-    duration  = params.get("duration", 120)
-    tables    = params.get("tables", 8)
-    rows      = params.get("tableSize", 1000000)
-    test_type = params.get("testType", "oltp_read_write")
-    creds     = DEFAULT_CREDENTIALS
-    read_only  = "on" if test_type == "oltp_read_only"  else "off"
-    write_only = "on" if test_type == "oltp_write_only" else "off"
-    cmd = (
-        f"./run_sysbench run {duration} {threads} {read_only} {write_only} "
-        f"{db_ip} 10 {rows} {tables} mysql "
-        f"{creds['username']} {creds['password']} {creds['dbName']} 1 1 1"
-    )
-    return ["bash", "-c", cmd]
+    return _sysbench(params, db_ip, params.get("testType", "oltp_read_write"),
+                     threads=params.get("threads", 4)) + [
+        f"--time={params.get('duration', 120)}",
+        f"--report-interval={params.get('reportInterval', 10)}",
+        "--rand-type=uniform",
+        "run",
+    ]
+
+
+def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
+    """
+    Drop and recreate the sbtest tables for this run's tables / tableSize.
+
+    base skips it when the volumes already hold this dataset. Always uses
+    oltp_read_write, whose schema every oltp_* test (and bulk_insert) runs on.
+    """
+    threads = min(params.get("tables", 8), PREPARE_THREADS)
+    sysbench = _sysbench(params, db_ip, "oltp_read_write", threads=threads)
+    return ["bash", "-c",
+            f"{shlex.join(sysbench + ['cleanup'])} && {shlex.join(sysbench + ['prepare'])}"]
+
+
+def _sysbench(params: dict, db_ip: str, test: str, threads: int) -> list[str]:
+    """sysbench <test> with connection and dataset options, no action."""
+    driver, port = _DRIVERS[params.get("_dbType", "mysql")]
+    return [
+        "sysbench", test,
+        f"--db-driver={driver}",
+        f"--{driver}-host={db_ip}",
+        f"--{driver}-port={port}",
+        f"--{driver}-user={params['_username']}",
+        f"--{driver}-password={params['_password']}",
+        f"--{driver}-db={params['_dbName']}",
+        f"--tables={params.get('tables', 8)}",
+        f"--table-size={params.get('tableSize', 1000000)}",
+        f"--threads={threads}",
+    ]
