@@ -245,6 +245,14 @@ def parse_ycsb(raw: str, params: dict) -> dict:
     if w_95  is not None: result["updateLatencyP95Us"] = w_95
     if w_99  is not None: result["updateLatencyP99Us"] = w_99
 
+    # Operations that did not return OK (e.g. [READ], Return=NOT_FOUND, 12
+    # or [UPDATE-FAILED] lines); YCSB still reports throughput for them
+    if result:
+        failed = sum(int(n) for n in re.findall(r'\],\s*Return=(?!OK\b)\w+,\s*(\d+)', text))
+        result["failedOps"] = failed
+        if failed:
+            logger.warning(f"ycsb parser: {failed} operations did not return OK")
+
     if not result:
         logger.warning("ycsb parser: no metrics found in output")
 

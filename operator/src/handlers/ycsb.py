@@ -7,6 +7,9 @@ All orchestration is in handlers/base.py.
 """
 
 import logging
+import shlex
+from urllib.parse import quote
+
 import kopf
 
 from src.handlers.base import (
@@ -25,10 +28,12 @@ VERSION = "v1alpha1"
 KIND = "SherlockYCSBSuite"
 PLURAL  = "sherlockycsbbenchsuites"
 
-DEFAULT_CREDENTIALS = {
-    "username": "sherlock",
-    "password": "sherlock",
-    "dbName":   "sherlock",
+# Read / update proportions of the image's workload files, passed again
+# because run_ycsb always sets both (scans, inserts and read-modify-writes
+# come from the file)
+WORKLOAD_PROPS = {
+    "a": ("0.5", "0.5"), "b": ("0.95", "0.05"), "c": ("1", "0"),
+    "d": ("0.95", "0"), "e": ("0", "0"), "f": ("0.5", "0"),
 }
 
 
@@ -53,6 +58,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
             parse_results=parse_ycsb, benchmark_image=BENCHMARK_IMAGE,
             suite_kind=KIND,
             owner=body,
+            build_prepare_command=_build_prepare_command,
         )
 
 
@@ -83,27 +89,52 @@ def on_delete(name, namespace, spec, status, meta, **kwargs):
 
 def _build_command(params: dict, db_ip: str) -> list[str]:
     """
-    Map YCSB sweep params to run_ycsb script args.
-    run_ycsb <db_type> <job_type> <db_ip> <workload> <threads>
-             <username> <password> <dbname> <recordcount> <opcount>
-             <distribution> <readprop> <updateprop> <runtime>
+    run_ycsb mongodb run <db_ip> <workload> <threads> <username> <password>
+             <dbname> <recordcount> <opcount> <distribution> <readprop>
+             <updateprop> <maxexecutiontime>
     """
-    workload  = params.get("workload", "a")
-    threads   = params.get("threads", 4)
-    records   = params.get("recordCount", 1000000)
-    ops       = params.get("operationCount", 100000)
-    dist      = params.get("requestDistribution", "uniform")
-    runtime   = params.get("maxExecutionTime", 120)
-    creds     = DEFAULT_CREDENTIALS
-    # Default read/update proportions per YCSB workload definition
-    WORKLOAD_PROPS = {
-        "a": ("0.5", "0.5"), "b": ("0.95", "0.05"), "c": ("1.0", "0.0"),
-        "d": ("0.95", "0.0"), "e": ("0.95", "0.0"), "f": ("0.5", "0.0"),
-    }
+    return ["bash", "-c", _run_ycsb("run", params, db_ip, params.get("threads", 4))]
+
+
+def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
+    """
+    Load recordCount records: drop usertable, ycsb load, then check the
+    count (ycsb exits 0 even when inserts fail). One loader thread per
+    client CPU. base skips this when the volumes already hold the records.
+    """
+    records = params.get("recordCount", 1000000)
+    threads = params.get("_clientCpus", 4)
+    script = f"""set -euo pipefail
+{_run_ycsb("cleanup", params, db_ip, threads)}
+{_run_ycsb("prepare", params, db_ip, threads)}
+count=$(mongo {shlex.quote(_mongo_url(params, db_ip))} --quiet --eval 'db.usertable.count()' | tail -1)
+if [ "$count" != "{records}" ]; then
+  echo "LOAD FAILED: expected {records} records, found '$count'"
+  exit 1
+fi
+echo "LOAD VERIFIED: {records} records"
+"""
+    return ["bash", "-c", script]
+
+
+def _run_ycsb(action: str, params: dict, db_ip: str, threads: int) -> str:
+    """One run_ycsb invocation. The image's workload files are workload<a-f>."""
+    workload = params.get("workload", "a")
     read_prop, update_prop = WORKLOAD_PROPS.get(workload, ("0.5", "0.5"))
-    cmd = (
-        f"./run_ycsb mongodb run {db_ip} {workload} {threads} "
-        f"{creds['username']} {creds['password']} {creds['dbName']} "
-        f"{records} {ops} {dist} {read_prop} {update_prop} {runtime}"
-    )
-    return ["bash", "-c", cmd]
+    # run_ycsb builds mongodb://user:password@host/db itself, so the
+    # credentials go in URL-encoded
+    args = [
+        "./run_ycsb", "mongodb", action, db_ip, f"workload{workload}", str(threads),
+        quote(params["_username"], safe=""), quote(params["_password"], safe=""),
+        params["_dbName"],
+        str(params.get("recordCount", 1000000)), str(params.get("operationCount", 100000)),
+        params.get("requestDistribution", "uniform"), read_prop, update_prop,
+        str(params.get("maxExecutionTime", 120)),
+    ]
+    return shlex.join(args)
+
+
+def _mongo_url(params: dict, db_ip: str) -> str:
+    user = quote(params["_username"], safe="")
+    password = quote(params["_password"], safe="")
+    return f"mongodb://{user}:{password}@{db_ip}:27017/{params['_dbName']}"

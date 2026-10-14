@@ -28,7 +28,11 @@ DB_IMAGES = {
     "postgresql": "postgres:11.7",
     "mysql":      "mysql:8.0",
     "mssql":      "mcr.microsoft.com/mssql/rhel/server:2019-latest",
-    "mongodb":    "mongo:latest",
+    # Pinned: the data files on reused volumes must match the server version,
+    # and the benchmark image's YCSB 0.17 / mongo 4.4 shell are old clients
+    # (fully qualified: the cluster resolves short names via a mirror that
+    # does not carry mongo)
+    "mongodb":    "docker.io/library/mongo:7.0",
 }
 
 DB_PORTS = {
@@ -42,6 +46,10 @@ DB_PORTS = {
 DB_CONFIG_MOUNTS = {
     # mysql:8.0 reads /etc/my.cnf, which includes /etc/mysql/conf.d/*.cnf
     "mysql": [{"configmap": "mysql-custom-config", "mount_path": "/etc/mysql/conf.d"}],
+    # Init script that creates the benchmark user in the benchmark database
+    # (MONGO_INITDB_ROOT_* only creates a root user in admin); run by the
+    # image on first start of an empty data directory
+    "mongodb": [{"configmap": "prep-ycsb", "mount_path": "/docker-entrypoint-initdb.d"}],
 }
 
 # Capabilities each database container needs. restricted-v2 drops all and

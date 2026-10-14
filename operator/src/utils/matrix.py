@@ -23,8 +23,9 @@ Example:
     ]
 """
 
+import hashlib
 import itertools
-from typing import Any
+from typing import Any, Optional
 
 
 def expand(sweep: dict) -> list[dict]:
@@ -70,7 +71,8 @@ def _should_include_in_name(key: str, value) -> bool:
     return True
 
 
-def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
+def make_run_name(suite_name: str, params: dict, max_len: int = 60,
+                  first_keys: Optional[list] = None) -> str:
     """
     Generate a deterministic run name from the suite name and parameter values.
 
@@ -84,6 +86,12 @@ def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
 
     The abbreviation map handles known parameter names. Unknown parameters
     fall back to the full key name.
+
+    first_keys: parameters to encode first, normally the ones that differ
+    between the suite's runs, so they survive truncation. A name longer than
+    max_len is cut and ends with a hash of the full name, which keeps it
+    unique (it used to end in "xxx", so runs differing only in the cut-off
+    part got the same name).
     """
     ABBREV = {
         # HammerDB
@@ -108,6 +116,9 @@ def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
         "recordCount":   "rc",
         "operationCount": "oc",
         "requestDistribution": "dist",
+        "maxExecutionTime": "met",
+        # sysbench
+        "reportInterval": "ri",
         # fio
         "blockSize":     "bs",
         "rwMixWrite":    "rw",
@@ -119,8 +130,11 @@ def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
         "directIO":      "dio",
     }
 
+    first = [k for k in (first_keys or []) if k in params]
+    ordered = first + [k for k in params if k not in first]
     parts = [suite_name]
-    for key, value in params.items():
+    for key in ordered:
+        value = params[key]
         if not _should_include_in_name(key, value):
             continue
         abbrev = ABBREV.get(key, key)
@@ -132,12 +146,22 @@ def make_run_name(suite_name: str, params: dict, max_len: int = 60) -> str:
 
     # k8s names must be <= 63 chars (DNS label). Truncate if needed,
     # keeping the suite name prefix intact.
+    name = name.lower()
     if len(name) > max_len:
-        suffix = name[len(suite_name):]
-        allowed = max_len - len(suite_name) - 3
-        name = suite_name + suffix[:allowed] + "xxx"
+        digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+        name = name[: max_len - len(digest) - 1].rstrip("-") + "-" + digest
 
-    return name.lower()
+    return name
+
+
+def varying_keys(matrix: list[dict]) -> list[str]:
+    """Parameters whose value differs between runs, in first-seen order."""
+    keys = []
+    for params in matrix:
+        for k in params:
+            if k not in keys and len({repr(p.get(k)) for p in matrix}) > 1:
+                keys.append(k)
+    return keys
 
 
 def count_runs(sweep: dict) -> int:

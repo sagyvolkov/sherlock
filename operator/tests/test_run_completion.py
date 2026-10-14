@@ -344,3 +344,13 @@ def test_run_waits_for_stat_collectors(cluster):
     base.complete_run_if_done(plural=PLURAL, suite_name="smoke", namespace="sherlock",
                               parse_results=parse_pgbench)
     assert _run(c)["phase"] == "Completed"
+
+
+def test_duplicate_run_names_rejected(monkeypatch):
+    import kopf
+    monkeypatch.setattr(base, "make_run_name", lambda name, params, **kw: "same")
+
+    class P:
+        status = {}
+    with pytest.raises(kopf.PermanentError):
+        base.initialize_suite("s", "ns", {"sweep": {"threads": [1, 2]}}, P(), suite_kind="K")

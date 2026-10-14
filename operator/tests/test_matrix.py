@@ -12,7 +12,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from src.utils.matrix import expand, make_run_name, count_runs
+from src.utils.matrix import expand, make_run_name, count_runs, varying_keys
 
 
 # ── expand() ─────────────────────────────────────────────────────────────────
@@ -160,6 +160,23 @@ class TestMakeRunName:
         """Suite name is always the prefix."""
         name = make_run_name("postgres-rw-sweep", {"clients": 8, "readWriteRatio": 70})
         assert name.startswith("postgres-rw-sweep")
+
+    def test_truncated_names_stay_unique(self):
+        """Runs that differ only past the cut-off still get different names."""
+        common = {f"param{i}": "x" * 8 for i in range(6)}
+        a = make_run_name("suite", {**common, "threads": 8})
+        b = make_run_name("suite", {**common, "threads": 16})
+        assert len(a) <= 60 and len(b) <= 60
+        assert a != b
+
+    def test_swept_params_come_first(self):
+        name = make_run_name("ycsb-mongo", {"workload": "a", "threads": 16},
+                             first_keys=["threads"])
+        assert name == "ycsb-mongo-t16-wla"
+
+    def test_varying_keys(self):
+        matrix = expand({"threads": [8, 16], "workload": ["a"], "maxExecutionTime": 60})
+        assert varying_keys(matrix) == ["threads"]
 
     def test_unknown_param_uses_full_key(self):
         """Params not in the abbrev map use the full key name."""

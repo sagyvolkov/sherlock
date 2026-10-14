@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import kopf
 from kubernetes.client.rest import ApiException
 
-from src.utils.matrix import expand, make_run_name, count_runs
+from src.utils.matrix import expand, make_run_name, count_runs, varying_keys
 from src.utils import k8s, volumes
 from src.utils.artifacts import (
     build_bundle, store_bundle, enforce_retention, parse_pvc_bundle_path,
@@ -104,16 +104,21 @@ def initialize_suite(
     """
     sweep = spec.get("sweep", {})
     matrix = expand(sweep)
+    swept = varying_keys(matrix)
 
     run_entries = [
         {
-            "name":        make_run_name(name, params),
+            "name":        make_run_name(name, params, first_keys=swept),
             "params":      params,
             "phase":       "Pending",
             "retryCount":  0,
         }
         for params in matrix
     ]
+    names = [r["name"] for r in run_entries]
+    if len(set(names)) != len(names):
+        # Runs are tracked by name; duplicates would complete each other
+        raise kopf.PermanentError(f"Duplicate run names in the sweep matrix: {names}")
 
     patch.status["phase"]     = "Provisioning" if is_fio else "Deploying"
     patch.status["runMatrix"] = run_entries
