@@ -685,7 +685,11 @@ def get_job_pod_logs(job_name: str, namespace: str) -> str:
         return ""
     pod_name = pods.items[0].metadata.name
     try:
-        return v1.read_namespaced_pod_log(pod_name, namespace)
+        # _preload_content=False: when the log is valid JSON (fio
+        # --output-format=json) the client otherwise parses it and returns
+        # the Python repr ({'fio version': ...}), which is not JSON.
+        resp = v1.read_namespaced_pod_log(pod_name, namespace, _preload_content=False)
+        return resp.data.decode("utf-8", errors="replace")
     except ApiException as e:
         logger.warning(f"Could not get logs for pod {pod_name}: {e}")
         return ""
