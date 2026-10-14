@@ -18,7 +18,7 @@ from src.parsers.benchmarks import parse_hammerdb
 PARAMS = {"virtualUsers": 16, "warehouses": 20, "rampupMins": 1, "testMins": 3,
           "allWarehouses": True,
           "_dbType": "mssql", "_username": "sa", "_password": "x", "_dbName": "tpcc",
-          "_saPassword": 'Pa$s"w[0]rd!'}
+          "_saPassword": 'Pa$s"w[0]rd!', "_clientCpus": 6}
 
 
 def _tcl(script: str) -> str:
@@ -57,7 +57,8 @@ class TestPrepareCommand:
         assert '"$count" != "20"' in script
         tcl = _tcl(script)
         assert "diset tpcc mssqls_count_ware 20" in tcl
-        assert f"diset tpcc mssqls_num_vu {hammerdb.BUILD_VIRTUAL_USERS}" in tcl
+        # one loader VU per client CPU
+        assert "diset tpcc mssqls_num_vu 6" in tcl
         assert "buildschema" in tcl
 
     def test_build_vus_not_above_warehouses(self):

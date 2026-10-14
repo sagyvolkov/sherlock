@@ -249,7 +249,9 @@ def run_next_benchmark(
     build_benchmark_command(params, db_ip) → list of strings (the container command)
       params also carries the database credentials and type as _username,
       _password, _dbName, _dbType (read from the credentials Secret for each
-      run, never stored in status).
+      run, never stored in status), and _clientCpus.
+    Prepare and benchmark Jobs use execution.clientResources (see
+    client_resources).
     parse_results(raw_log, params) → dict of result metrics
     build_prepare_command(params, db_ip) → container command that loads the
       benchmark data (the "prepare" job type in run_database_workload-parallel).
@@ -355,7 +357,7 @@ def run_next_benchmark(
             command=command,
             node_name=dep["node"],
             labels=labels,
-            resources=spec.get("database", {}).get("resources", {}),
+            resources=client_resources(spec),
             owner=owner,
             # A hung benchmark is marked Failed instead of blocking the run
             active_deadline_seconds=timeout_secs,
@@ -769,7 +771,32 @@ def _command_params(spec: dict, namespace: str, params: dict) -> dict:
         "_dbName":   creds["dbName"],
         # MSSQL only: HammerDB connects as sa
         "_saPassword": creds.get("saPassword", ""),
+        # Whole CPUs the client pod may use; sizes parallel data loading
+        "_clientCpus": client_cpus(spec),
     }
+
+
+def client_resources(spec: dict) -> dict:
+    """
+    Resources for the benchmark client pods (prepare and run Jobs):
+    execution.clientResources, or database.resources if it is not set.
+    """
+    return ((spec.get("execution") or {}).get("clientResources")
+            or (spec.get("database") or {}).get("resources") or {})
+
+
+def client_cpus(spec: dict) -> int:
+    """
+    Whole CPUs a client pod may use: limits.cpu, else requests.cpu, else
+    the Job default (k8s.create_job). "500m" counts as 1.
+    """
+    res = client_resources(spec)
+    cpu = ((res.get("limits") or {}).get("cpu")
+           or (res.get("requests") or {}).get("cpu")
+           or k8s.DEFAULT_JOB_CPU_LIMIT)
+    cpu = str(cpu)
+    value = float(cpu[:-1]) / 1000 if cpu.endswith("m") else float(cpu)
+    return max(1, int(value))
 
 
 def _prepare_databases(
@@ -831,7 +858,7 @@ def _prepare_databases(
                 LABEL_RUN:   run_name,
                 LABEL_ROLE:  "prepare",
             },
-            resources=spec.get("database", {}).get("resources", {}),
+            resources=client_resources(spec),
             owner=owner,
             active_deadline_seconds=PREPARE_TIMEOUT_SECS,
         )

@@ -69,9 +69,34 @@ class TestCommandParams:
         out = base._command_params(spec, "sherlock", params)
         assert out == {"threads": 4, "_dbType": "mysql",
                        "_username": "u", "_password": "p", "_dbName": "d",
-                       "_saPassword": ""}
+                       "_saPassword": "", "_clientCpus": 4}
         assert params == {"threads": 4}
         assert seen == {"db_type": "mysql", "secret": "my-creds"}
+
+
+class TestClientResources:
+    DB = {"limits": {"cpu": "2", "memory": "4Gi"}}
+
+    def test_client_resources_preferred_over_database(self):
+        spec = {"database": {"resources": self.DB},
+                "execution": {"clientResources": {"limits": {"cpu": "16"}}}}
+        assert base.client_resources(spec) == {"limits": {"cpu": "16"}}
+        assert base.client_cpus(spec) == 16
+
+    def test_falls_back_to_database_resources(self):
+        spec = {"database": {"resources": self.DB}, "execution": {}}
+        assert base.client_resources(spec) == self.DB
+        assert base.client_cpus(spec) == 2
+
+    @pytest.mark.parametrize("res, cpus", [
+        ({}, 4),                                    # Job default
+        ({"requests": {"cpu": "3"}}, 3),            # requests when no limit
+        ({"limits": {"cpu": "500m"}}, 1),           # never below 1
+        ({"limits": {"cpu": "2500m"}}, 2),
+        ({"limits": {"cpu": "7.5"}}, 7),
+    ])
+    def test_cpu_parsing(self, res, cpus):
+        assert base.client_cpus({"execution": {"clientResources": res}}) == cpus
 
 
 def test_secret_values_are_base64_decoded(monkeypatch):

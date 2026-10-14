@@ -28,8 +28,6 @@ VERSION = "v1alpha1"
 KIND = "SherlockHammerDBSuite"
 PLURAL  = "sherlockhammerdbsuites"
 
-# Virtual users that load warehouses in parallel during the schema build
-BUILD_VIRTUAL_USERS = 8
 
 SQLCMD = "/opt/mssql-tools/bin/sqlcmd"
 
@@ -126,8 +124,10 @@ def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
     """
     Build the TPC-C schema for this run's warehouse count.
 
-    HammerDB refuses to build into a database that already has tables, so
-    the database is dropped first. hammerdbcli exits 0 even when the build
+    Generating the data is CPU bound, so one loader virtual user runs per
+    client CPU (execution.clientResources limits.cpu), at most one per
+    warehouse. HammerDB refuses to build into a database that already has
+    tables, so the database is dropped first. hammerdbcli exits 0 even when the build
     fails, so the warehouse count is checked afterwards.
     base skips all of this when the volumes already hold the warehouses.
     """
@@ -138,7 +138,7 @@ def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
     tcl = _connection_tcl(params, db_ip) + f"""
 diset tpcc mssqls_dbase {_tcl_quote(db_name)}
 diset tpcc mssqls_count_ware {warehouses}
-diset tpcc mssqls_num_vu {min(warehouses, BUILD_VIRTUAL_USERS)}
+diset tpcc mssqls_num_vu {min(warehouses, params.get('_clientCpus', 1))}
 buildschema
 while {{![vucomplete]}} {{ after 5000; update }}
 """

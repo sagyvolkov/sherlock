@@ -175,6 +175,30 @@ spec:
                 execution:
                   type: object
                   properties:
+                    clientResources:
+                      type: object
+                      description: >
+                        CPU and memory for the benchmark client pods: the prepare
+                        (data load) Jobs and the benchmark run Jobs. Kept separate
+                        from database.resources, which applies to the database pods.
+                        Data generation is CPU bound (HammerDB in particular), and
+                        HammerDB uses one loader virtual user per CPU of limits.cpu.
+                        If omitted, the client pods use database.resources.
+                      properties:
+                        requests:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                            memory:
+                              type: string
+                        limits:
+                          type: object
+                          properties:
+                            cpu:
+                              type: string
+                            memory:
+                              type: string
                     order:
                       type: string
                       enum: [sequential, parallel]

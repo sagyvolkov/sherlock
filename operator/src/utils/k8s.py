@@ -547,6 +547,10 @@ def parse_duration_secs(value: Optional[str], default: int) -> int:
         return default
 
 
+# CPU limit of a Job when its resources do not set one
+DEFAULT_JOB_CPU_LIMIT = "4"
+
+
 def create_job(
     name: str,
     namespace: str,
@@ -631,7 +635,7 @@ def create_job(
                 "memory": resources.get("requests", {}).get("memory", "1Gi"),
             },
             limits={
-                "cpu":    resources.get("limits", {}).get("cpu", "4"),
+                "cpu":    resources.get("limits", {}).get("cpu", DEFAULT_JOB_CPU_LIMIT),
                 "memory": resources.get("limits", {}).get("memory", "2Gi"),
             },
         ),
