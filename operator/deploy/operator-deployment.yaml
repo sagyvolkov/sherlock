@@ -45,6 +45,16 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             readOnlyRootFilesystem: true
+          # The root filesystem is read-only; /tmp is where artifact bundles
+          # are built and where the "local" destination keeps them
+          # (/tmp/sherlock-artifacts, lost when the pod restarts).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 2Gi
       securityContext:
         runAsNonRoot: true
       restartPolicy: Always
