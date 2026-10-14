@@ -26,6 +26,10 @@ def configure(settings: kopf.OperatorSettings, **kwargs):
     # Retry failed handlers up to 5 times with exponential backoff
     settings.posting.level = logging.WARNING
     settings.persistence.finalizer = 'sherlock.io/operator-finalizer'
+    # Keep handler progress (retry counts, delays) in annotations only. The
+    # default also writes status.kopf, which the CRD status schemas prune,
+    # and kopf then logs "Patching failed with inconsistencies".
+    settings.persistence.progress_storage = kopf.AnnotationsProgressStorage()
 
     # How often kopf re-checks objects that are in a waiting state
     settings.watching.server_timeout = 60
