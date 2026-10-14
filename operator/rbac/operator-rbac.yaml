@@ -34,10 +34,10 @@ rules:
     resources: [services]
     verbs: [get, list, create, delete]
 
-  # Manage ConfigMaps (MySQL config, MongoDB init script, result summaries)
+  # Manage ConfigMaps (MySQL config, MongoDB init script, artifact bundle chunks)
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, create, update, replace]
+    verbs: [get, list, create, update, delete]
 
   # Manage Secrets (MSSQL SA password, S3 credentials)
   - apiGroups: [""]

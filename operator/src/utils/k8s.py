@@ -107,6 +107,7 @@ def create_pvc(
     volume_mode: str = "Filesystem",
     labels: Optional[dict] = None,
     annotations: Optional[dict] = None,
+    access_mode: str = "ReadWriteOnce",
 ) -> client.V1PersistentVolumeClaim:
     """
     Create a PVC and return it.
@@ -117,7 +118,7 @@ def create_pvc(
     """
     v1 = client.CoreV1Api()
     spec = client.V1PersistentVolumeClaimSpec(
-        access_modes=["ReadWriteOnce"],
+        access_modes=[access_mode],
         volume_mode=volume_mode,
         resources=client.V1ResourceRequirements(
             requests={"storage": storage_size}
@@ -521,7 +522,7 @@ def create_job(
     namespace: str,
     image: str,
     command: list[str],
-    node_name: str,
+    node_name: Optional[str],
     labels: dict,
     resources: dict,
     pvc_mounts: Optional[list[dict]] = None,
@@ -530,13 +531,17 @@ def create_job(
     ttl_seconds: int = 3600,
     owner: Optional[dict] = None,
     active_deadline_seconds: Optional[int] = None,
+    configmap_mount: Optional[dict] = None,
 ) -> client.V1Job:
     """
     Create a k8s Job.
     Replaces start_the_workload_job() and run_stats() in run_database_workload-parallel,
     and run_fio_job_fs() / run_fio_job_raw() in run_fio_job.
 
+    node_name: node to run on; None lets the scheduler pick
     pvc_mounts: list of {"pvc_name": str, "mount_path": str, "read_only": bool}
+    configmap_mount: {"mount_path": str, "items": [(configmap, key, file), ...]}
+      projects keys of one or more ConfigMaps into one read-only directory
     ttl_seconds: auto-clean up the Job object after completion (default 1h)
     host_network: True only for stat collector pods (original used hostNetwork: true)
     owner: suite CR (kopf body) that owns the Job; sets ownerReferences
@@ -559,6 +564,23 @@ def create_job(
                 claim_name=m["pvc_name"],
                 read_only=m.get("read_only", False),
             )
+        ))
+
+    if configmap_mount:
+        by_configmap: dict = {}
+        for cm_name, key, path in configmap_mount["items"]:
+            by_configmap.setdefault(cm_name, []).append(
+                client.V1KeyToPath(key=key, path=path))
+        volume_mounts.append(client.V1VolumeMount(
+            name="configmaps", mount_path=configmap_mount["mount_path"], read_only=True,
+        ))
+        volumes.append(client.V1Volume(
+            name="configmaps",
+            projected=client.V1ProjectedVolumeSource(sources=[
+                client.V1VolumeProjection(config_map=client.V1ConfigMapProjection(
+                    name=cm_name, items=items))
+                for cm_name, items in by_configmap.items()
+            ]),
         ))
 
     env = [
@@ -587,7 +609,7 @@ def create_job(
 
     pod_spec = client.V1PodSpec(
         restart_policy="Never",
-        node_selector={"kubernetes.io/hostname": node_name},
+        node_selector={"kubernetes.io/hostname": node_name} if node_name else None,
         containers=[container],
         volumes=volumes,
         host_network=host_network,
@@ -613,7 +635,7 @@ def create_job(
 
     try:
         result = batch_v1.create_namespaced_job(namespace, job)
-        logger.info(f"Created job {name} on node {node_name}")
+        logger.info(f"Created job {name} on node {node_name or '(any)'}")
         return result
     except ApiException as e:
         if e.status == 409:
@@ -774,23 +796,32 @@ def get_node_tolerations(node_name: str) -> list[dict]:
 def create_configmap(
     name: str,
     namespace: str,
-    data: dict,
+    data: Optional[dict] = None,
     labels: Optional[dict] = None,
+    binary_data: Optional[dict] = None,
+    owner: Optional[dict] = None,
 ) -> client.V1ConfigMap:
     """
     Create a ConfigMap. Used for:
     - MySQL custom config (innodb_buffer_pool_size, etc.)
     - MongoDB init script (create user / db)
-    - Result summaries written by the operator after each run
+    - Artifact bundle chunks handed to the PVC writer Job
+
+    binary_data: {key: bytes}; base64-encoded here.
+    owner: suite CR that owns the ConfigMap (garbage-collected with it).
     """
+    import base64
     v1 = client.CoreV1Api()
     cm = client.V1ConfigMap(
         metadata=client.V1ObjectMeta(
             name=name,
             namespace=namespace,
             labels=labels or {},
+            owner_references=[owner_reference(owner)] if owner else None,
         ),
         data=data,
+        binary_data={k: base64.b64encode(v).decode() for k, v in binary_data.items()}
+        if binary_data else None,
     )
     try:
         result = v1.create_namespaced_config_map(namespace, cm)
@@ -802,6 +833,14 @@ def create_configmap(
             logger.info(f"Replaced ConfigMap {name}")
             return result
         raise
+
+
+def delete_configmap(name: str, namespace: str):
+    try:
+        client.CoreV1Api().delete_namespaced_config_map(name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise
 
 
 # ── Secrets ───────────────────────────────────────────────────────────────────

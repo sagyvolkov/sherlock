@@ -28,7 +28,9 @@ from kubernetes.client.rest import ApiException
 
 from src.utils.matrix import expand, make_run_name, count_runs
 from src.utils import k8s, volumes
-from src.utils.artifacts import build_bundle, store_bundle, enforce_retention
+from src.utils.artifacts import (
+    build_bundle, store_bundle, enforce_retention, parse_pvc_bundle_path,
+)
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
     launch_stat_collectors,
@@ -538,6 +540,7 @@ def complete_run_if_done(
                 suite_name=suite_name, namespace=namespace,
                 spec=spec, status=status, patch=patch,
                 run=run, job_states=states, parse_results=parse_results,
+                owner=suite,
             )
         except Exception:
             logger.exception(
@@ -578,6 +581,7 @@ def handle_run_completion(
     run: dict,
     job_states: dict[str, str],
     parse_results: Callable[[str, dict], dict],
+    owner: Optional[dict] = None,
 ):
     """
     Called exactly once per run attempt, after every benchmark Job is terminal
@@ -647,19 +651,24 @@ def handle_run_completion(
             params=params,
             compression=artifacts_spec.get("compression", "gzip"),
         )
-        artifact_path = store_bundle(
+        record = store_bundle(
             bundle=bundle,
             run_name=run_name,
             suite_name=suite_name,
             namespace=namespace,
             artifacts_spec=artifacts_spec,
-            patch=patch,
+            owner=owner,
         )
-        current_bundles = (
-            patch.status.get("artifacts", {}).get("bundles", [])
-            or status.get("artifacts", {}).get("bundles", [])
+        artifact_path = record["path"]
+        # Earlier runs' bundles come from status: this patch starts empty
+        bundles = enforce_retention(
+            suite_name, artifacts_spec,
+            (status.get("artifacts") or {}).get("bundles", []) + [record],
+            namespace=namespace, owner=owner,
         )
-        enforce_retention(suite_name, artifacts_spec, current_bundles)
+        patch.status["artifacts"] = {**(status.get("artifacts") or {}), "bundles": bundles}
+        if artifact_path.startswith("pvc://"):
+            patch.status["artifacts"]["pvcName"] = parse_pvc_bundle_path(artifact_path)[0]
     except Exception as e:
         logger.warning(f"[{suite_name}] Artifact collection failed for {run_name}: {e}")
         artifact_path = ""

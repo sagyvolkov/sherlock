@@ -387,6 +387,12 @@ spec:
                           enum: [pvc, s3, local]
                         pvc:
                           type: object
+                          description: >
+                            Bundles are written to PVC <suite>-artifacts (created on the
+                            first run, kept when the suite is deleted) under
+                            <suite>-<uid prefix>/<run>.tar.gz by a short writer Job, and
+                            recorded as pvc://<pvc>/<path> in status.artifacts.bundles.
+                            To copy them out, mount the PVC in a pod and use oc cp.
                           properties:
                             storageClass:
                               type: string

@@ -104,8 +104,10 @@ def cluster(monkeypatch):
                    "get_job_pod_logs", "patch_suite_status"):
             monkeypatch.setattr(base.k8s, fn, getattr(c, fn))
         monkeypatch.setattr(base, "build_bundle", lambda **kw: b"")
-        monkeypatch.setattr(base, "store_bundle", lambda **kw: "/artifacts/x.tgz")
-        monkeypatch.setattr(base, "enforce_retention", lambda *a, **kw: None)
+        monkeypatch.setattr(base, "store_bundle", lambda **kw: {
+            "runName": kw["run_name"], "path": "/artifacts/x.tgz",
+            "sizeBytes": 0, "collectedAt": "2026-10-14T00:00:00+00:00"})
+        monkeypatch.setattr(base, "enforce_retention", lambda name, spec, bundles, **kw: bundles)
         return c
     return make
 
@@ -318,3 +320,14 @@ def test_progress_logged_at_info_only_when_count_changes(cluster, caplog):
                               parse_results=parse_pgbench)
     assert "1/3" in info_lines()[-1].getMessage()
     assert len(info_lines()) == 2
+
+
+def test_bundles_accumulate_across_runs(cluster):
+    c = cluster()
+    earlier = {"runName": "older", "path": "/artifacts/old.tgz",
+               "sizeBytes": 1, "collectedAt": "2026-10-13T00:00:00+00:00"}
+    c.suite["status"]["artifacts"] = {"bundles": [earlier]}
+    for j in JOBS:
+        _event(c, j)
+    bundles = c.suite["status"]["artifacts"]["bundles"]
+    assert [b["runName"] for b in bundles] == ["older", "smoke-r0"]

@@ -124,13 +124,17 @@ def store_bundle(
     suite_name: str,
     namespace: str,
     artifacts_spec: dict,
-    patch,
-) -> str:
+    owner: Optional[dict] = None,
+) -> dict:
     """
     Write a bundle to the configured destination.
-    Returns the path/key where the bundle was stored.
 
-    Updates patch.status.artifacts with the bundle reference.
+    Returns the bundle record for status.artifacts.bundles:
+        {"runName", "path", "sizeBytes", "collectedAt"}
+    The caller merges it with the existing records and applies retention.
+
+    owner: the suite CR; needed by the pvc destination, whose writer Job
+    and chunk ConfigMaps it owns.
     """
     dest = artifacts_spec.get("destination", {})
     dest_type = dest.get("type", "local")
@@ -138,7 +142,8 @@ def store_bundle(
     filename = f"{run_name}.tar.gz" if compression != "none" else f"{run_name}.tar"
 
     if dest_type == "pvc":
-        path = _store_pvc(bundle, filename, suite_name, namespace, dest.get("pvc", {}))
+        path = _store_pvc(bundle, filename, suite_name, namespace,
+                          dest.get("pvc", {}), owner)
     elif dest_type == "s3":
         path = _store_s3(bundle, filename, suite_name, dest.get("s3", {}))
     elif dest_type == "local":
@@ -148,11 +153,60 @@ def store_bundle(
         path = _store_local(bundle, filename, suite_name, namespace)
 
     logger.info(f"Bundle stored at: {path} ({len(bundle)} bytes)")
-    _update_artifacts_status(patch, run_name, path, len(bundle))
-    return path
+    return {
+        "runName":     run_name,
+        "path":        path,
+        "sizeBytes":   len(bundle),
+        "collectedAt": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── PVC destination ───────────────────────────────────────────────────────────
+#
+# The operator pod cannot mount a PVC created at run time, so a short writer
+# Job does the writing: the bundle goes into one or more ConfigMaps (each
+# under the 1 MiB object limit), the Job mounts them next to the artifacts
+# PVC, joins the chunks, checks the sha256 and renames the file into place.
+# The ConfigMaps are deleted afterwards.
+#
+# The artifacts PVC (<suite>-artifacts) is not owned by the suite, so the
+# bundles survive the suite. Each suite instance writes to its own directory,
+# <suite>-<uid prefix>/, so a recreated suite with the same name never
+# overwrites earlier results. Bundle paths are recorded as
+#   pvc://<pvc name>/<suite>-<uid prefix>/<run>.tar.gz
+
+ARTIFACTS_MOUNT = "/artifacts"
+# Any image with sh and coreutils; the benchmark image is already on the nodes
+ARTIFACT_WRITER_IMAGE = "quay.io/sagyvolkov/benchmark-container:sherlock0.5"
+WRITER_RESOURCES = {"requests": {"cpu": "100m", "memory": "64Mi"},
+                    "limits":   {"cpu": "500m", "memory": "256Mi"}}
+WRITER_TIMEOUT_SECS = 600
+# Raw bytes per ConfigMap; base64 makes it ~1.2 MiB, under the API's 1.5 MiB request limit
+CHUNK_BYTES = 900 * 1024
+
+_WRITE_SCRIPT = """set -eu
+dir="$ARTIFACTS_MOUNT/$BUNDLE_DIR"
+mkdir -p "$dir"
+cat /bundle/chunk-* > "$dir/.$BUNDLE_FILE.part"
+echo "$BUNDLE_SHA256  $dir/.$BUNDLE_FILE.part" | sha256sum -c -
+mv "$dir/.$BUNDLE_FILE.part" "$dir/$BUNDLE_FILE"
+ls -l "$dir/$BUNDLE_FILE"
+"""
+
+
+def artifacts_pvc_name(suite_name: str) -> str:
+    return f"{suite_name}-artifacts"
+
+
+def pvc_bundle_path(pvc_name: str, rel_path: str) -> str:
+    return f"pvc://{pvc_name}/{rel_path}"
+
+
+def parse_pvc_bundle_path(path: str) -> tuple[str, str]:
+    """pvc://<pvc>/<dir>/<file> → (pvc, "<dir>/<file>")."""
+    pvc_name, _, rel_path = path[len("pvc://"):].partition("/")
+    return pvc_name, rel_path
+
 
 def _store_pvc(
     bundle: bytes,
@@ -160,39 +214,120 @@ def _store_pvc(
     suite_name: str,
     namespace: str,
     pvc_spec: dict,
+    owner: Optional[dict],
 ) -> str:
     """
-    Write bundle to a PVC. The operator mounts a shared artifacts PVC
-    at /artifacts inside the operator pod.
-
-    The PVC is created once per Suite (on first run) and shared across
-    all runs in the Suite.
+    Write bundle to the suite's artifacts PVC through a writer Job and wait
+    for it. Raises if the Job fails or times out.
     """
-    artifacts_pvc_name = f"{suite_name}-artifacts"
-    _ensure_artifacts_pvc(artifacts_pvc_name, namespace, pvc_spec)
+    import hashlib
+    from src.utils import k8s
 
-    # Write to /artifacts/<suite_name>/<filename>
-    # The operator pod mounts the artifacts PVC at /artifacts
-    artifacts_dir = f"/artifacts/{suite_name}"
-    os.makedirs(artifacts_dir, exist_ok=True)
-    path = os.path.join(artifacts_dir, filename)
+    if not owner:
+        raise ValueError("pvc artifact destination needs the suite (owner)")
+    uid = owner["metadata"]["uid"]
+    pvc_name = artifacts_pvc_name(suite_name)
+    _ensure_artifacts_pvc(pvc_name, namespace, pvc_spec)
 
-    with open(path, "wb") as f:
-        f.write(bundle)
+    bundle_dir = f"{suite_name}-{uid[:8]}"
+    run_key = f"{uid}/{filename}"
+    labels = {
+        "sherlock.io/suite-name": suite_name,
+        "sherlock.io/role": "artifact-writer",
+    }
 
-    return path
+    chunks = [bundle[i:i + CHUNK_BYTES] for i in range(0, len(bundle), CHUNK_BYTES)] or [b""]
+    cm_names, items = [], []
+    try:
+        for n, chunk in enumerate(chunks):
+            cm_name = k8s.job_name(f"{suite_name}-bundle-{n}", f"{run_key}/{n}")
+            k8s.create_configmap(cm_name, namespace, binary_data={"chunk": chunk},
+                                 labels=labels, owner=owner)
+            cm_names.append(cm_name)
+            items.append((cm_name, "chunk", f"chunk-{n:04d}"))
+
+        job_name = k8s.job_name(f"{suite_name}-artifacts", run_key)
+        k8s.create_job(
+            name=job_name,
+            namespace=namespace,
+            image=ARTIFACT_WRITER_IMAGE,
+            command=["sh", "-c", _WRITE_SCRIPT],
+            node_name=None,
+            labels=labels,
+            resources=WRITER_RESOURCES,
+            pvc_mounts=[{"pvc_name": pvc_name, "mount_path": ARTIFACTS_MOUNT}],
+            configmap_mount={"mount_path": "/bundle", "items": items},
+            env_vars={
+                "ARTIFACTS_MOUNT": ARTIFACTS_MOUNT,
+                "BUNDLE_DIR":      bundle_dir,
+                "BUNDLE_FILE":     filename,
+                "BUNDLE_SHA256":   hashlib.sha256(bundle).hexdigest(),
+            },
+            owner=owner,
+            active_deadline_seconds=WRITER_TIMEOUT_SECS,
+        )
+        _wait_for_job(job_name, namespace, WRITER_TIMEOUT_SECS + 30)
+    finally:
+        for cm_name in cm_names:
+            k8s.delete_configmap(cm_name, namespace)
+
+    return pvc_bundle_path(pvc_name, f"{bundle_dir}/{filename}")
 
 
 def _ensure_artifacts_pvc(name: str, namespace: str, pvc_spec: dict):
-    """Create the artifacts PVC if it doesn't exist yet."""
+    """Create the artifacts PVC if it doesn't exist yet (never owned by the suite)."""
     from src.utils.k8s import create_pvc
     create_pvc(
         name=name,
         namespace=namespace,
         storage_size=pvc_spec.get("size", "20Gi"),
         storage_class=pvc_spec.get("storageClass", ""),
+        access_mode=pvc_spec.get("accessMode", "ReadWriteOnce"),
         labels={"sherlock.io/role": "artifacts"},
     )
+
+
+def _delete_pvc_bundles(paths: list[str], namespace: str, owner: Optional[dict]):
+    """Delete bundles from artifacts PVCs with one Job per PVC (not awaited)."""
+    from src.utils import k8s
+    by_pvc: dict = {}
+    for path in paths:
+        pvc_name, rel_path = parse_pvc_bundle_path(path)
+        if not pvc_name or not rel_path or ".." in rel_path.split("/"):
+            logger.warning(f"Not deleting suspicious bundle path {path}")
+            continue
+        by_pvc.setdefault(pvc_name, []).append(f"{ARTIFACTS_MOUNT}/{rel_path}")
+    for pvc_name, files in by_pvc.items():
+        k8s.create_job(
+            name=k8s.job_name(f"{pvc_name}-cleanup", "\n".join(sorted(files))),
+            namespace=namespace,
+            image=ARTIFACT_WRITER_IMAGE,
+            command=["sh", "-c", 'rm -fv "$@"', "rm", *files],
+            node_name=None,
+            labels={"sherlock.io/role": "artifact-cleanup"},
+            resources=WRITER_RESOURCES,
+            pvc_mounts=[{"pvc_name": pvc_name, "mount_path": ARTIFACTS_MOUNT}],
+            owner=owner,
+            active_deadline_seconds=WRITER_TIMEOUT_SECS,
+        )
+
+
+def _wait_for_job(name: str, namespace: str, timeout: int):
+    """Block until the Job completes; raise with its log if it fails."""
+    import time
+    from src.utils import k8s
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = k8s.get_job_state(name, namespace)
+        if state == "Complete":
+            return
+        if state in ("Failed", "Missing"):
+            raise RuntimeError(
+                f"artifact Job {name} {state.lower()}: "
+                f"{k8s.get_job_pod_logs(name, namespace)[-1000:]}"
+            )
+        time.sleep(2)
+    raise TimeoutError(f"artifact Job {name} not done within {timeout}s")
 
 
 # ── S3 destination ────────────────────────────────────────────────────────────
@@ -290,34 +425,19 @@ def _store_local(
     return path
 
 
-# ── Status update ─────────────────────────────────────────────────────────────
-
-def _update_artifacts_status(patch, run_name: str, path: str, size_bytes: int):
-    """Append this run's bundle to status.artifacts.bundles."""
-    from datetime import datetime, timezone
-    bundles = patch.status.get("artifacts", {}).get("bundles", [])
-    bundles.append({
-        "runName":     run_name,
-        "path":        path,
-        "sizeBytes":   size_bytes,
-        "collectedAt": datetime.now(timezone.utc).isoformat(),
-    })
-    if "artifacts" not in patch.status:
-        patch.status["artifacts"] = {}
-    patch.status["artifacts"]["bundles"] = bundles
-
-
 # ── Retention enforcement ─────────────────────────────────────────────────────
 
 def enforce_retention(
     suite_name: str,
     artifacts_spec: dict,
     current_bundles: list[dict],
+    namespace: str = "",
+    owner: Optional[dict] = None,
 ) -> list[dict]:
     """
     Apply retention policy to existing bundles.
     Deletes bundles exceeding keepLastN or older than ttlDays.
-    Returns the updated bundle list.
+    Returns the surviving bundle records, which the caller writes to status.
     """
     retention = artifacts_spec.get("retention", {})
     keep_last_n = retention.get("keepLastN")
@@ -327,29 +447,32 @@ def enforce_retention(
         return current_bundles
 
     surviving = list(current_bundles)
+    expired = []
 
     # TTL: remove bundles older than ttlDays
     if ttl_days:
         cutoff = datetime.now(timezone.utc).timestamp() - (ttl_days * 86400)
-        to_delete = []
-        for b in surviving:
+        for b in list(surviving):
             collected = b.get("collectedAt", "")
-            if collected:
-                ts = datetime.fromisoformat(collected).timestamp()
-                if ts < cutoff:
-                    to_delete.append(b)
-        for b in to_delete:
-            _delete_bundle(b.get("path", ""), artifacts_spec)
-            surviving.remove(b)
-            logger.info(f"[{suite_name}] Deleted expired bundle: {b['runName']}")
+            if collected and datetime.fromisoformat(collected).timestamp() < cutoff:
+                surviving.remove(b)
+                expired.append(b)
+                logger.info(f"[{suite_name}] Deleting expired bundle: {b['runName']}")
 
     # keepLastN: remove oldest beyond the limit
     if keep_last_n and len(surviving) > keep_last_n:
-        to_delete = surviving[:-keep_last_n]
-        for b in to_delete:
-            _delete_bundle(b.get("path", ""), artifacts_spec)
+        for b in surviving[:-keep_last_n]:
             surviving.remove(b)
-            logger.info(f"[{suite_name}] Deleted bundle beyond keepLastN={keep_last_n}: {b['runName']}")
+            expired.append(b)
+            logger.info(f"[{suite_name}] Deleting bundle beyond "
+                        f"keepLastN={keep_last_n}: {b['runName']}")
+
+    pvc_paths = [b["path"] for b in expired if b.get("path", "").startswith("pvc://")]
+    if pvc_paths:
+        _delete_pvc_bundles(pvc_paths, namespace, owner)
+    for b in expired:
+        if not b.get("path", "").startswith("pvc://"):
+            _delete_bundle(b.get("path", ""), artifacts_spec)
 
     return surviving
 
