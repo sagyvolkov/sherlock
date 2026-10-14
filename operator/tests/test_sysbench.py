@@ -20,24 +20,32 @@ from src.utils import credentials
 
 PARAMS = {"threads": 16, "tables": 4, "tableSize": 10000, "testType": "oltp_read_only",
           "duration": 60, "reportInterval": 5,
-          "_dbType": "mysql", "_username": "bench", "_password": "p@ss word", "_dbName": "sb"}
+          "_dbType": "mysql", "_username": "bench", "_dbName": "sb"}
+
+
+def _words(cmd):
+    """Shell words of a bash -c command (env refs stay as $VARS)."""
+    assert cmd[:2] == ["bash", "-c"]
+    return shlex.split(cmd[2])
 
 
 class TestCommands:
     def test_run_uses_test_type_and_all_options(self):
-        cmd = sysbench._build_command(PARAMS, "10.0.0.5")
+        cmd = _words(sysbench._build_command(PARAMS, "10.0.0.5"))
         assert cmd[:2] == ["sysbench", "oltp_read_only"]
         assert cmd[-1] == "run"
         for opt in ("--db-driver=mysql", "--mysql-host=10.0.0.5", "--mysql-port=3306",
-                    "--mysql-user=bench", "--mysql-password=p@ss word", "--mysql-db=sb",
+                    "--mysql-user=$SHERLOCK_DB_USER", "--mysql-password=$SHERLOCK_DB_PASSWORD",
+                    "--mysql-db=$SHERLOCK_DB_NAME",
                     "--tables=4", "--table-size=10000", "--threads=16", "--time=60",
                     "--report-interval=5"):
             assert opt in cmd
         assert not any("ignore-errors" in c for c in cmd)
 
     def test_postgresql_uses_pgsql_driver(self):
-        cmd = sysbench._build_command({**PARAMS, "_dbType": "postgresql"}, "10.0.0.5")
+        cmd = _words(sysbench._build_command({**PARAMS, "_dbType": "postgresql"}, "10.0.0.5"))
         assert "--db-driver=pgsql" in cmd and "--pgsql-port=5432" in cmd
+        assert "--pgsql-password=$SHERLOCK_DB_PASSWORD" in cmd
 
     def test_prepare_cleans_then_loads_with_capped_threads(self):
         shell = sysbench._build_prepare_command({**PARAMS, "tables": 32}, "10.0.0.5")
@@ -47,31 +55,27 @@ class TestCommands:
         assert cleanup[1] == prepare[1] == "oltp_read_write"
         assert cleanup[-1] == "cleanup" and prepare[-1] == "prepare"
         assert f"--threads={sysbench.PREPARE_THREADS}" in prepare
-        assert "--mysql-password=p@ss word" in prepare   # quoted correctly
         assert "--tables=32" in prepare
 
     def test_prepare_threads_not_above_table_count(self):
         shell = sysbench._build_prepare_command(PARAMS, "10.0.0.5")
         assert "--threads=4" in shell[2]
 
+    def test_password_env_ref_is_double_quoted(self):
+        # double quotes: the shell expands the variable, and a password with
+        # spaces stays one argument
+        assert '--mysql-password="$SHERLOCK_DB_PASSWORD"' in sysbench._build_command(PARAMS, "ip")[2]
+
 
 class TestCommandParams:
-    def test_adds_credentials_and_type_without_touching_params(self, monkeypatch):
-        seen = {}
-
-        def fake_resolve(db_type, namespace, secret):
-            seen.update(db_type=db_type, secret=secret)
-            return {"username": "u", "password": "p", "dbName": "d"}
-
-        monkeypatch.setattr(base, "resolve_credentials", fake_resolve)
+    def test_adds_connection_details_but_no_password(self):
         params = {"threads": 4}
         spec = {"database": {"type": "mysql", "credentialsSecret": "my-creds"}}
-        out = base._command_params(spec, "sherlock", params)
-        assert out == {"threads": 4, "_dbType": "mysql",
-                       "_username": "u", "_password": "p", "_dbName": "d",
-                       "_saPassword": "", "_clientCpus": 4}
+        status = {"dbCredentials": {"username": "u", "dbName": "d"}}
+        out = base._command_params(spec, status, params)
+        assert out == {"threads": 4, "_dbType": "mysql", "_username": "u",
+                       "_dbName": "d", "_clientCpus": 4}
         assert params == {"threads": 4}
-        assert seen == {"db_type": "mysql", "secret": "my-creds"}
 
 
 class TestClientResources:
@@ -111,3 +115,41 @@ def test_secret_values_are_base64_decoded(monkeypatch):
     monkeypatch.setattr(credentials.client, "CoreV1Api", FakeCore)
     assert credentials.resolve("mysql", "sherlock", "my-creds") == {
         "username": "bench", "password": "s3cret", "dbName": "sb"}
+
+
+class TestSuiteSecret:
+    def test_secret_content_and_client_env(self, monkeypatch):
+        written = {}
+        monkeypatch.setattr("src.utils.k8s.create_secret",
+                            lambda name, ns, data, owner=None, labels=None: written.update(
+                                name=name, data=data, owner=owner))
+        owner = {"metadata": {"name": "s1", "uid": "u"}}
+        name = credentials.write_suite_secret(
+            "s1", "sherlock", "mssql",
+            {"username": "sa", "password": "p w@x", "dbName": "tpcc", "saPassword": "Sa!1"}, owner)
+        assert name == written["name"] == "s1-db-credentials"
+        assert written["owner"] is owner
+        assert written["data"]["passwordUrl"] == "p%20w%40x"
+        assert written["data"]["saPassword"] == "Sa!1"
+        env = credentials.client_secret_env("s1", "mssql")
+        assert env["SHERLOCK_DB_PASSWORD"] == ("s1-db-credentials", "password")
+        assert env["SQLCMDPASSWORD"] == ("s1-db-credentials", "saPassword")
+        assert "SQLCMDPASSWORD" not in credentials.client_secret_env("s1", "mysql")
+
+    def test_database_pods_get_passwords_from_secret(self):
+        from src.db.deploy import _build_env_vars
+        for db in ("postgresql", "mysql", "mssql", "mongodb"):
+            env = _build_env_vars(db, "u", "d", "s1-db-credentials")
+            secret_refs = {k for k, v in env.items() if isinstance(v, dict)}
+            plain = {k: v for k, v in env.items() if not isinstance(v, dict)}
+            assert secret_refs, db
+            assert not any("PASSWORD" in k for k in plain), (db, plain)
+
+
+def test_pgbench_command_takes_credentials_from_environment():
+    from src.handlers import pgbench
+    cmd = pgbench._build_command({"clients": 2, "threads": 2, "duration": 30,
+                                  "readWriteRatio": 100, "scaleFactor": 10}, "10.0.0.1")
+    words = shlex.split(cmd[2])
+    assert words[10:13] == ["$SHERLOCK_DB_USER", "$SHERLOCK_DB_PASSWORD", "$SHERLOCK_DB_NAME"]
+    assert '"$SHERLOCK_DB_PASSWORD"' in cmd[2]

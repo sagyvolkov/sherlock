@@ -93,13 +93,14 @@ def _build_command(params: dict, db_ip: str) -> list[str]:
     passes --mysql-ignore-errors=all, hiding every SQL error. sysbench's
     default ignore list (deadlocks and lock wait timeouts) applies instead.
     """
-    return _sysbench(params, db_ip, params.get("testType", "oltp_read_write"),
-                     threads=params.get("threads", 4)) + [
+    run = _sysbench(params, db_ip, params.get("testType", "oltp_read_write"),
+                    threads=params.get("threads", 4))
+    return ["bash", "-c", run + " " + shlex.join([
         f"--time={params.get('duration', 120)}",
         f"--report-interval={params.get('reportInterval', 10)}",
         "--rand-type=uniform",
         "run",
-    ]
+    ])]
 
 
 def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
@@ -111,22 +112,24 @@ def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
     """
     threads = min(params.get("tables", 8), PREPARE_THREADS)
     sysbench = _sysbench(params, db_ip, "oltp_read_write", threads=threads)
-    return ["bash", "-c",
-            f"{shlex.join(sysbench + ['cleanup'])} && {shlex.join(sysbench + ['prepare'])}"]
+    return ["bash", "-c", f"{sysbench} cleanup && {sysbench} prepare"]
 
 
-def _sysbench(params: dict, db_ip: str, test: str, threads: int) -> list[str]:
-    """sysbench <test> with connection and dataset options, no action."""
+def _sysbench(params: dict, db_ip: str, test: str, threads: int) -> str:
+    """
+    sysbench <test> with connection and dataset options, no action, as a
+    shell fragment. User, password and database come from the Job's
+    environment (the suite's credentials Secret).
+    """
     driver, port = _DRIVERS[params.get("_dbType", "mysql")]
-    return [
+    static = shlex.join([
         "sysbench", test,
         f"--db-driver={driver}",
         f"--{driver}-host={db_ip}",
         f"--{driver}-port={port}",
-        f"--{driver}-user={params['_username']}",
-        f"--{driver}-password={params['_password']}",
-        f"--{driver}-db={params['_dbName']}",
         f"--tables={params.get('tables', 8)}",
         f"--table-size={params.get('tableSize', 1000000)}",
         f"--threads={threads}",
-    ]
+    ])
+    return (f'{static} --{driver}-user="$SHERLOCK_DB_USER" '
+            f'--{driver}-password="$SHERLOCK_DB_PASSWORD" --{driver}-db="$SHERLOCK_DB_NAME"')

@@ -316,6 +316,23 @@ spec:
                         Whether to run stat collector pods (iostat, vmstat, ip/ifconfig)
                         alongside benchmark jobs. Set false to run benchmark-only with
                         no OS-level collection.
+                    statsIntervalSeconds:
+                      type: integer
+                      minimum: 1
+                      default: 10
+                      description: >
+                        Seconds between stat samples (iostat / vmstat / mpstat
+                        interval). Totals are rate x sample length, so the interval
+                        only sets the time resolution of the raw data.
+                    statsMarginSeconds:
+                      type: integer
+                      minimum: 0
+                      default: 30
+                      description: >
+                        Collection time added to the benchmark runtime, so the
+                        whole run falls inside the window even if the benchmark
+                        pods start late. Rates are always totals divided by the
+                        benchmark runtime, not by the window.
                     statsDevicePattern:
                       type: string
                       description: >
@@ -514,6 +531,11 @@ spec:
                           type: string
                         description: >
                           Path or S3 key where this run's bundle was written.
+                      statNodes:
+                        type: object
+                        description: Node each stat collector Job ran on (Job name → node).
+                        additionalProperties:
+                          type: string
                       instanceResults:
                         type: array
                         description: >-

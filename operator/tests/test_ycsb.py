@@ -15,21 +15,22 @@ from src.parsers.benchmarks import parse_ycsb
 
 PARAMS = {"threads": 16, "workload": "e", "recordCount": 100000, "operationCount": 5000000,
           "requestDistribution": "zipfian", "maxExecutionTime": 60,
-          "_dbType": "mongodb", "_username": "bench", "_password": "p@ss:w/rd",
-          "_dbName": "sherlock", "_clientCpus": 6}
+          "_dbType": "mongodb", "_username": "bench", "_dbName": "sherlock",
+          "_clientCpus": 6}
 
 
 def _args(line: str) -> list[str]:
     return shlex.split(line)
 
 
-def test_run_uses_workload_file_name_and_encoded_credentials():
+def test_run_uses_workload_file_name_and_env_credentials():
     cmd = ycsb._build_command(PARAMS, "10.0.0.9")
     assert cmd[:2] == ["bash", "-c"]
     args = _args(cmd[2])
     assert args == ["./run_ycsb", "mongodb", "run", "10.0.0.9", "workloade", "16",
-                    "bench", "p%40ss%3Aw%2Frd", "sherlock", "100000", "5000000",
-                    "zipfian", "0", "0", "60"]
+                    "$SHERLOCK_DB_USER_URL", "$SHERLOCK_DB_PASSWORD_URL", "$SHERLOCK_DB_NAME",
+                    "100000", "5000000", "zipfian", "0", "0", "60"]
+    assert '"$SHERLOCK_DB_PASSWORD_URL"' in cmd[2]   # expanded by the shell
 
 
 def test_workload_e_keeps_its_scan_mix():
@@ -45,7 +46,8 @@ def test_prepare_drops_loads_and_verifies_count():
     assert lines.index(cleanup) < lines.index(prepare)
     assert _args(prepare)[5] == "6"                     # loader threads = client CPUs
     assert "db.usertable.count()" in script
-    assert "mongodb://bench:p%40ss%3Aw%2Frd@10.0.0.9:27017/sherlock" in script
+    assert ('"mongodb://${SHERLOCK_DB_USER_URL}:${SHERLOCK_DB_PASSWORD_URL}'
+            '@10.0.0.9:27017/${SHERLOCK_DB_NAME}"') in script
     assert '"$count" != "100000"' in script
 
 

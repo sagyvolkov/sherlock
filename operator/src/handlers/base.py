@@ -33,12 +33,11 @@ from src.utils.artifacts import (
 )
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
-    launch_stat_collectors, stats_count, wait_for_collectors_running,
-    DEFAULT_STATS_INTERVAL,
+    launch_stat_collectors, stats_count, stats_settings, wait_for_collectors_running,
 )
 from src.parsers.base import parse_storage_stats
 from src.parsers.aggregate import aggregate_results
-from src.utils.credentials import resolve as resolve_credentials
+from src.utils.credentials import write_suite_secret, client_secret_env
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +167,9 @@ def deploy_db_infrastructure(
         # password intentionally not stored in status — handlers re-resolve from Secret
     }
     db_spec = spec["database"]
+    # Database pods and benchmark Jobs read passwords only from this Secret
+    secret_name = write_suite_secret(name, namespace, db_spec["type"],
+                                     db_credentials, owner)
     vol = volumes.settings(db_spec, default_prefix=db_spec["type"])
     run_matrix = patch.status.get("runMatrix") or []
     first_params = run_matrix[0]["params"] if run_matrix else {}
@@ -198,6 +200,7 @@ def deploy_db_infrastructure(
             on_create=vol["onCreate"],
             dataset=volumes.dataset_params(suite_kind, first_params),
             sa_password=db_credentials.get("saPassword"),
+            credentials_secret=secret_name,
         )
     except volumes.VolumesBusy as e:
         logger.info(f"[{name}] Waiting: {e}")
@@ -253,9 +256,10 @@ def run_next_benchmark(
     Replaces the main loop in run_database_workload-parallel.
 
     build_benchmark_command(params, db_ip) → list of strings (the container command)
-      params also carries the database credentials and type as _username,
-      _password, _dbName, _dbType (read from the credentials Secret for each
-      run, never stored in status), and _clientCpus.
+      params also carries _dbType, _username, _dbName and _clientCpus.
+      Passwords are not passed: the Jobs get them as environment variables
+      from the suite's credentials Secret (credentials.CLIENT_ENV), and the
+      commands refer to those variables.
     Prepare and benchmark Jobs use execution.clientResources (see
     client_resources).
     parse_results(raw_log, params) → dict of result metrics
@@ -281,7 +285,8 @@ def run_next_benchmark(
         return
 
     run_name = next_run["name"]
-    params   = _command_params(spec, namespace, next_run["params"])
+    params   = _command_params(spec, status, next_run["params"])
+    secret_env = client_secret_env(suite_name, db_spec.get("type", "postgresql"))
     suite_uid = ((owner or {}).get("metadata") or {}).get("uid", "")
     # Unique per suite instance, run and retry attempt
     run_key  = f"{suite_uid}/{run_name}/{next_run.get('retryCount', 0)}"
@@ -313,6 +318,7 @@ def run_next_benchmark(
             suite_kind=suite_kind,
             owner=owner,
             run_key=run_key,
+            secret_env=secret_env,
         )
         if not prepared:
             _update_run_phase(patch, run_matrix, run_name, "Failed",
@@ -323,13 +329,14 @@ def run_next_benchmark(
     # ── Launch stat collectors ────────────────────────────────────────────────
     stat_jobs = {}
     if spec.get("artifacts", {}).get("collectStats", True):
+        interval, margin = stats_settings(spec.get("artifacts"))
         stat_jobs = launch_stat_collectors(
             suite_name=suite_name,
             run_name=run_name,
             namespace=namespace,
             worker_nodes=worker_nodes,
-            stats_interval=DEFAULT_STATS_INTERVAL,
-            stats_count=stats_count(_get_runtime_secs(params, spec)),
+            stats_interval=interval,
+            stats_count=stats_count(_get_runtime_secs(params, spec), interval, margin),
             owner=owner,
             name_key=run_key,
         )
@@ -364,6 +371,7 @@ def run_next_benchmark(
             owner=owner,
             # A hung benchmark is marked Failed instead of blocking the run
             active_deadline_seconds=timeout_secs,
+            secret_env=secret_env,
         )
         benchmark_jobs[job_name] = dep
 
@@ -657,7 +665,7 @@ def handle_run_completion(
         storage_results = parse_storage_stats(
             {stat_nodes.get(j, j): log for j, log in stat_logs.items()},
             runtime_secs=_get_runtime_secs(params, spec),
-            interval=DEFAULT_STATS_INTERVAL,
+            interval=stats_settings(artifacts_spec)[0],
             device_pattern=artifacts_spec.get("statsDevicePattern"),
             network_interfaces=artifacts_spec.get("statsNetworkInterfaces"),
         )
@@ -776,19 +784,14 @@ def _advance(suite_name, spec, status, patch):
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _command_params(spec: dict, namespace: str, params: dict) -> dict:
-    """Run params plus the database credentials and type for building commands."""
-    db_spec = spec.get("database") or {}
-    db_type = db_spec.get("type", "postgresql")
-    creds = resolve_credentials(db_type, namespace, db_spec.get("credentialsSecret"))
+def _command_params(spec: dict, status: dict, params: dict) -> dict:
+    """Run params plus the non-secret connection details for building commands."""
+    db_creds = (status or {}).get("dbCredentials") or {}
     return {
         **params,
-        "_dbType":   db_type,
-        "_username": creds["username"],
-        "_password": creds["password"],
-        "_dbName":   creds["dbName"],
-        # MSSQL only: HammerDB connects as sa
-        "_saPassword": creds.get("saPassword", ""),
+        "_dbType":   (spec.get("database") or {}).get("type", "postgresql"),
+        "_username": db_creds.get("username", ""),
+        "_dbName":   db_creds.get("dbName", ""),
         # Whole CPUs the client pod may use; sizes parallel data loading
         "_clientCpus": client_cpus(spec),
     }
@@ -830,6 +833,7 @@ def _prepare_databases(
     suite_kind: str,
     owner: Optional[dict] = None,
     run_key: str = "",
+    secret_env: Optional[dict] = None,
 ) -> bool:
     """
     Launch one prepare Job per database instance and block until all finish.
@@ -879,6 +883,7 @@ def _prepare_databases(
             resources=client_resources(spec),
             owner=owner,
             active_deadline_seconds=PREPARE_TIMEOUT_SECS,
+            secret_env=secret_env,
         )
         prepare_jobs.append(job_name)
 

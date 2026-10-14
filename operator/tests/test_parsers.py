@@ -536,3 +536,13 @@ class TestParseVmstat:
     def test_empty_output_returns_empty_dict(self):
         result = parse_vmstat("")
         assert result == {}
+
+
+def test_stats_settings_and_count():
+    from src.plugins.storage.generic import stats_settings, stats_count
+    assert stats_settings({}) == (10, 30)
+    assert stats_settings({"statsIntervalSeconds": 5, "statsMarginSeconds": 0}) == (5, 0)
+    # 600s run, 10s samples, 30s margin → 63 samples; 5s/0s → 120
+    assert stats_count(600, 10, 30) == 63
+    assert stats_count(600, 5, 0) == 120
+    assert stats_count(125, 10, 0) == 13          # rounds up

@@ -149,3 +149,61 @@ def make_example_secret(
     for k, v in defaults.items():
         lines.append(f"  {k}: {v}   # change this")
     return "\n".join(lines)
+
+
+# ── Per-suite credentials Secret ─────────────────────────────────────────────
+#
+# Passwords never appear in pod specs or command lines. At deploy time the
+# operator writes the resolved credentials to a Secret owned by the suite;
+# database pods and benchmark Jobs read them from it through secretKeyRef
+# environment variables, and the benchmark commands refer to the variables
+# ("$SHERLOCK_DB_PASSWORD", HammerDB's $::env(SHERLOCK_SA_PASSWORD), ...).
+
+# Client (prepare / benchmark Job) environment → key in the suite Secret
+CLIENT_ENV = {
+    "SHERLOCK_DB_USER":         "username",
+    "SHERLOCK_DB_PASSWORD":     "password",
+    "SHERLOCK_DB_NAME":         "dbName",
+    # URL-encoded, for mongodb:// URLs (YCSB, mongo shell)
+    "SHERLOCK_DB_USER_URL":     "usernameUrl",
+    "SHERLOCK_DB_PASSWORD_URL": "passwordUrl",
+}
+MSSQL_CLIENT_ENV = {
+    "SHERLOCK_SA_PASSWORD": "saPassword",
+    # read by sqlcmd instead of -P
+    "SQLCMDPASSWORD":       "saPassword",
+}
+
+
+def suite_secret_name(suite_name: str) -> str:
+    return f"{suite_name}-db-credentials"
+
+
+def write_suite_secret(suite_name: str, namespace: str, db_type: str,
+                       creds: dict, owner: dict) -> str:
+    """Write the suite's credentials Secret (owned by the suite); returns its name."""
+    from urllib.parse import quote
+    from src.utils import k8s
+    data = {
+        "username":    creds["username"],
+        "password":    creds["password"],
+        "dbName":      creds["dbName"],
+        "usernameUrl": quote(creds["username"], safe=""),
+        "passwordUrl": quote(creds["password"], safe=""),
+    }
+    if db_type == "mssql":
+        data["saPassword"] = creds.get("saPassword") or creds["password"]
+    name = suite_secret_name(suite_name)
+    k8s.create_secret(name, namespace, data, owner=owner,
+                      labels={"sherlock.io/suite": suite_name,
+                              "sherlock.io/role": "db-credentials"})
+    return name
+
+
+def client_secret_env(suite_name: str, db_type: str) -> dict:
+    """{env var: (secret, key)} for prepare and benchmark Jobs."""
+    env = dict(CLIENT_ENV)
+    if db_type == "mssql":
+        env.update(MSSQL_CLIENT_ENV)
+    secret = suite_secret_name(suite_name)
+    return {var: (secret, key) for var, key in env.items()}

@@ -37,12 +37,21 @@ DEFAULT_STATS_COUNT = 60      # number of intervals (interval × count = total d
 # Extra collection time beyond the benchmark runtime. Collectors start
 # before the benchmark pods, which can take a while to schedule and start;
 # metrics are totals, so idle time at either end does not skew them.
-STATS_MARGIN_SECS = 30
+DEFAULT_STATS_MARGIN_SECS = 30
 
 
-def stats_count(runtime_secs: int, interval: int = DEFAULT_STATS_INTERVAL) -> int:
+def stats_settings(artifacts_spec: dict) -> tuple[int, int]:
+    """(sample interval, margin) in seconds from artifacts.statsIntervalSeconds
+    and artifacts.statsMarginSeconds."""
+    spec = artifacts_spec or {}
+    return (int(spec.get("statsIntervalSeconds") or DEFAULT_STATS_INTERVAL),
+            int(spec.get("statsMarginSeconds", DEFAULT_STATS_MARGIN_SECS)))
+
+
+def stats_count(runtime_secs: int, interval: int = DEFAULT_STATS_INTERVAL,
+                margin_secs: int = DEFAULT_STATS_MARGIN_SECS) -> int:
     """Number of samples covering the benchmark runtime plus the margin."""
-    return -(-(int(runtime_secs) + STATS_MARGIN_SECS) // interval)
+    return -(-(int(runtime_secs) + int(margin_secs)) // int(interval))
 
 
 def launch_stat_collectors(

@@ -8,7 +8,6 @@ All orchestration is in handlers/base.py.
 
 import logging
 import shlex
-from urllib.parse import quote
 
 import kopf
 
@@ -107,7 +106,7 @@ def _build_prepare_command(params: dict, db_ip: str) -> list[str]:
     script = f"""set -euo pipefail
 {_run_ycsb("cleanup", params, db_ip, threads)}
 {_run_ycsb("prepare", params, db_ip, threads)}
-count=$(mongo {shlex.quote(_mongo_url(params, db_ip))} --quiet --eval 'db.usertable.count()' | tail -1)
+count=$(mongo {_mongo_url(db_ip)} --quiet --eval 'db.usertable.count()' | tail -1)
 if [ "$count" != "{records}" ]; then
   echo "LOAD FAILED: expected {records} records, found '$count'"
   exit 1
@@ -121,20 +120,20 @@ def _run_ycsb(action: str, params: dict, db_ip: str, threads: int) -> str:
     """One run_ycsb invocation. The image's workload files are workload<a-f>."""
     workload = params.get("workload", "a")
     read_prop, update_prop = WORKLOAD_PROPS.get(workload, ("0.5", "0.5"))
-    # run_ycsb builds mongodb://user:password@host/db itself, so the
-    # credentials go in URL-encoded
-    args = [
-        "./run_ycsb", "mongodb", action, db_ip, f"workload{workload}", str(threads),
-        quote(params["_username"], safe=""), quote(params["_password"], safe=""),
-        params["_dbName"],
+    # run_ycsb builds mongodb://user:password@host/db itself, so it gets the
+    # URL-encoded credentials, from the Job's environment
+    head = shlex.join(["./run_ycsb", "mongodb", action, db_ip, f"workload{workload}",
+                       str(threads)])
+    tail = shlex.join([
         str(params.get("recordCount", 1000000)), str(params.get("operationCount", 100000)),
         params.get("requestDistribution", "uniform"), read_prop, update_prop,
         str(params.get("maxExecutionTime", 120)),
-    ]
-    return shlex.join(args)
+    ])
+    return (f'{head} "$SHERLOCK_DB_USER_URL" "$SHERLOCK_DB_PASSWORD_URL" '
+            f'"$SHERLOCK_DB_NAME" {tail}')
 
 
-def _mongo_url(params: dict, db_ip: str) -> str:
-    user = quote(params["_username"], safe="")
-    password = quote(params["_password"], safe="")
-    return f"mongodb://{user}:{password}@{db_ip}:27017/{params['_dbName']}"
+def _mongo_url(db_ip: str) -> str:
+    """Shell word: mongodb:// URL built from the Job's environment."""
+    return ('"mongodb://${SHERLOCK_DB_USER_URL}:${SHERLOCK_DB_PASSWORD_URL}'
+            f'@{db_ip}:27017/${{SHERLOCK_DB_NAME}}"')

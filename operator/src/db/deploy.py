@@ -86,6 +86,7 @@ def deploy_databases(
     on_create: str = "reuse",
     dataset: Optional[dict] = None,
     sa_password: Optional[str] = None,   # MSSQL only
+    credentials_secret: str = "",
 ) -> tuple[list[dict], dict]:
     """
     Deploy all database instances for a Suite run.
@@ -101,6 +102,9 @@ def deploy_databases(
     the data prepared on them; see utils/volumes.py. dataset is the dataset
     params of the first run, part of the layout the PVCs must match.
     Deployments and Services are owned by the suite (owner); PVCs are not.
+    Passwords reach the database containers only through credentials_secret
+    (secretKeyRef env vars); db_password / sa_password are used here only for
+    the volume layout's password hash.
 
     Returns (deployments, volumes):
         deployments: [{"name": "postgresql-0", "node": "worker1",
@@ -137,11 +141,9 @@ def deploy_databases(
     if db_type == "mysql":
         _create_mysql_configmap(namespace)
     if db_type == "mongodb":
-        _create_mongodb_configmap(namespace, db_username, db_password, db_name)
-    if db_type == "mssql":
-        if not sa_password:
-            raise ValueError("sa_password is required for mssql deployments")
-        k8s.create_secret("sqlserver", namespace, {"SA_PASSWORD": sa_password})
+        _create_mongodb_configmap(namespace, db_name)
+    if db_type == "mssql" and not sa_password:
+        raise ValueError("sa_password is required for mssql deployments")
 
     # ── Volumes ───────────────────────────────────────────────────────────────
     # Database pods left by an earlier suite (or an earlier attempt of this
@@ -166,7 +168,7 @@ def deploy_databases(
         pod_name = f"{prefix}-{j}"
         pvc_name = pvc_names[j]
 
-        env_vars = _build_env_vars(db_type, db_username, db_password, db_name, sa_password)
+        env_vars = _build_env_vars(db_type, db_username, db_name, credentials_secret)
 
         k8s.create_deployment(
             name=pod_name,
@@ -281,43 +283,45 @@ def _remove_databases(prefix: str, namespace: str):
 def _build_env_vars(
     db_type: str,
     username: str,
-    password: str,
     db_name: str,
-    sa_password: Optional[str] = None,
+    secret: str,
 ) -> dict:
     """
     Build the environment variable dict for a database container.
     Mirrors the env: sections in the original create_databases bash functions.
+    Passwords are secretKeyRefs into the suite's credentials Secret.
     """
+    def ref(key):
+        return {"secret": secret, "key": key}
+
     if db_type == "postgresql":
         return {
-            "POSTGRES_PASSWORD": password,
+            "POSTGRES_PASSWORD": ref("password"),
             "POSTGRES_USER":     username,
             "POSTGRES_DB":       db_name,
             "PGDATA":            "/var/lib/postgresql/data/pgdata",
         }
     elif db_type == "mysql":
         return {
-            "MYSQL_ROOT_PASSWORD": password,
+            "MYSQL_ROOT_PASSWORD": ref("password"),
             "MYSQL_DATABASE":      db_name,
             "MYSQL_USER":          username,
-            "MYSQL_PASSWORD":      password,
+            "MYSQL_PASSWORD":      ref("password"),
         }
     elif db_type == "mssql":
         return {
-            "MSSQL_PID":   "Developer",
-            "ACCEPT_EULA": "Y",
-            # SA_PASSWORD comes from a Secret — expressed as a secretKeyRef
-            "MSSQL_SA_PASSWORD": {
-                "secret": "sqlserver",
-                "key":    "SA_PASSWORD",
-            },
+            "MSSQL_PID":         "Developer",
+            "ACCEPT_EULA":       "Y",
+            "MSSQL_SA_PASSWORD": ref("saPassword"),
         }
     elif db_type == "mongodb":
         return {
-            "MONGO_INITDB_ROOT_PASSWORD": password,
+            "MONGO_INITDB_ROOT_PASSWORD": ref("password"),
             "MONGO_INITDB_ROOT_USERNAME": username,
             "MONGO_INITDB_DATABASE":      db_name,
+            # read by the prep-ycsb init script
+            "SHERLOCK_DB_USER":           username,
+            "SHERLOCK_DB_PASSWORD":       ref("password"),
         }
     else:
         raise ValueError(f"Unknown db_type: {db_type}")
@@ -349,16 +353,13 @@ def _create_mysql_configmap(namespace: str):
     )
 
 
-def _create_mongodb_configmap(
-    namespace: str,
-    username: str,
-    password: str,
-    db_name: str,
-):
+def _create_mongodb_configmap(namespace: str, db_name: str):
     """
     Create the MongoDB init script ConfigMap.
     Replaces create_mongodb_config_map() in create_databases.
-    Creates the sherlock user with readWrite role on the benchmark db.
+    Creates the benchmark user with readWrite on the benchmark db; the user
+    name and password come from the container environment (the suite's
+    credentials Secret), so the ConfigMap holds no credentials.
     """
     k8s.create_configmap(
         name="prep-ycsb",
@@ -366,8 +367,8 @@ def _create_mongodb_configmap(
         data={
             "ensure-users.js": "\n".join([
                 "db.createUser({",
-                f"  user: '{username}',",
-                f"  pwd: '{password}',",
+                "  user: process.env.SHERLOCK_DB_USER,",
+                "  pwd: process.env.SHERLOCK_DB_PASSWORD,",
                 "  roles: [{",
                 "    role: 'readWrite',",
                 f"    db: '{db_name}'",

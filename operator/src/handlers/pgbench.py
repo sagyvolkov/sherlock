@@ -156,15 +156,10 @@ def _run_pgbench(action: str, params: dict, db_ip: str) -> str:
 
     read_only = "true" if rw_ratio == 100 else "false"
 
-    # Credentials are passed in via params dict (populated from status.credentials
-    # which is set during the deploy phase)
-    username = params.get("_username", "sherlock")
-    password = params.get("_password", "sherlock")
-    db_name  = params.get("_dbName",   "sherlock")
-
+    # Credentials come from the Job's environment (suite credentials Secret)
     return (
         f"./run_pgbench {action} {db_ip} {clients} {threads} "
         f"time {duration} false false {scale} "
-        f"{username} {password} {db_name} "
+        f'"$SHERLOCK_DB_USER" "$SHERLOCK_DB_PASSWORD" "$SHERLOCK_DB_NAME" '
         f"10 {read_only}"
     )

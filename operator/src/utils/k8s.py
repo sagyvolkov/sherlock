@@ -568,6 +568,7 @@ def create_job(
     configmap_mount: Optional[dict] = None,
     block_devices: Optional[list[dict]] = None,
     service_account: Optional[str] = None,
+    secret_env: Optional[dict] = None,
 ) -> client.V1Job:
     """
     Create a k8s Job.
@@ -581,6 +582,8 @@ def create_job(
     block_devices: list of {"pvc_name": str, "device_path": str} for
       volumeMode=Block PVCs, exposed as raw devices (volumeDevices)
     service_account: pod service account (default: the namespace default)
+    secret_env: {env var: (secret name, key)} set from Secrets (secretKeyRef),
+      for credentials that must not appear in the Job spec
     ttl_seconds: auto-clean up the Job object after completion (default 1h)
     host_network: True only for stat collector pods (original used hostNetwork: true)
     owner: suite CR (kopf body) that owns the Job; sets ownerReferences
@@ -636,6 +639,10 @@ def create_job(
     env = [
         client.V1EnvVar(name=k, value=str(v))
         for k, v in (env_vars or {}).items()
+    ] + [
+        client.V1EnvVar(name=var, value_from=client.V1EnvVarSource(
+            secret_key_ref=client.V1SecretKeySelector(name=secret, key=key)))
+        for var, (secret, key) in (secret_env or {}).items()
     ]
 
     container = client.V1Container(
@@ -908,17 +915,23 @@ def create_secret(
     name: str,
     namespace: str,
     data: dict,
+    owner: Optional[dict] = None,
+    labels: Optional[dict] = None,
 ) -> client.V1Secret:
     """
-    Create an Opaque Secret.
-    Used for MSSQL SA_PASSWORD and S3 credentials.
+    Create (or replace) an Opaque Secret.
+    Used for the per-suite database credentials.
     data values should be plain strings (base64 encoding is handled automatically).
+    owner: suite CR that owns the Secret (garbage-collected with it).
     """
     import base64
     v1 = client.CoreV1Api()
     encoded = {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}
     secret = client.V1Secret(
-        metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+        metadata=client.V1ObjectMeta(
+            name=name, namespace=namespace, labels=labels,
+            owner_references=[owner_reference(owner)] if owner else None,
+        ),
         type="Opaque",
         data=encoded,
     )
@@ -926,7 +939,7 @@ def create_secret(
         return v1.create_namespaced_secret(namespace, secret)
     except ApiException as e:
         if e.status == 409:
-            # Replace, so a changed password (e.g. MSSQL sa) takes effect
+            # Replace, so changed credentials take effect
             logger.debug(f"Secret {name} already exists, replacing")
             return v1.replace_namespaced_secret(name, namespace, secret)
         raise

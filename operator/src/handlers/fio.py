@@ -104,8 +104,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
 
     from src.utils import k8s
     from src.plugins.storage.generic import (
-        launch_stat_collectors, stats_count, wait_for_collectors_running,
-        DEFAULT_STATS_INTERVAL,
+        launch_stat_collectors, stats_count, stats_settings, wait_for_collectors_running,
     )
 
     run_matrix   = status.get("runMatrix", [])
@@ -141,11 +140,12 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
     # Launch stat collectors
     stat_jobs = {}
     if spec.get("artifacts", {}).get("collectStats", True):
+        interval, margin = stats_settings(spec.get("artifacts"))
         stat_jobs = launch_stat_collectors(
             suite_name=name, run_name=run_name, namespace=namespace,
             worker_nodes=worker_nodes,
-            stats_interval=DEFAULT_STATS_INTERVAL,
-            stats_count=stats_count(params.get("runtime", 60)),
+            stats_interval=interval,
+            stats_count=stats_count(params.get("runtime", 60), interval, margin),
             owner=body,
             name_key=run_key,
         )

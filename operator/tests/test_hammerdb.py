@@ -17,8 +17,7 @@ from src.parsers.benchmarks import parse_hammerdb
 
 PARAMS = {"virtualUsers": 16, "warehouses": 20, "rampupMins": 1, "testMins": 3,
           "allWarehouses": True,
-          "_dbType": "mssql", "_username": "sa", "_password": "x", "_dbName": "tpcc",
-          "_saPassword": 'Pa$s"w[0]rd!', "_clientCpus": 6}
+          "_dbType": "mssql", "_username": "sa", "_dbName": "tpcc", "_clientCpus": 6}
 
 
 def _tcl(script: str) -> str:
@@ -41,9 +40,9 @@ class TestRunCommand:
         assert "$x < 420" in tcl
         assert "hammerdbcli auto /tmp/sherlock.tcl" in cmd[2]
 
-    def test_password_is_quoted_for_tcl(self):
+    def test_password_read_from_environment(self):
         tcl = _tcl(hammerdb._build_command(PARAMS, "10.0.0.7")[2])
-        assert r'diset connection mssqls_pass "Pa\$s\"w\[0\]rd!"' in tcl
+        assert "diset connection mssqls_pass $::env(SHERLOCK_SA_PASSWORD)" in tcl
 
 
 class TestPrepareCommand:
@@ -65,9 +64,9 @@ class TestPrepareCommand:
         tcl = _tcl(hammerdb._build_prepare_command({**PARAMS, "warehouses": 2}, "ip")[2])
         assert "diset tpcc mssqls_num_vu 2" in tcl
 
-    def test_sa_password_shell_quoted(self):
+    def test_sqlcmd_takes_password_from_environment(self):
         script = hammerdb._build_prepare_command(PARAMS, "10.0.0.7")[2]
-        assert "-P 'Pa$s\"w[0]rd!'" in script
+        assert " -P " not in script        # SQLCMDPASSWORD from the Secret
 
     def test_rejects_unsafe_database_name(self):
         with pytest.raises(ValueError):
@@ -90,3 +89,11 @@ class TestParser:
 
 def test_stats_cover_rampup_and_measurement():
     assert _get_runtime_secs({"testMins": 3, "rampupMins": 1}, {}) == 240
+
+
+def test_unsafe_password_characters():
+    assert hammerdb.unsafe_password_chars("Sherlock1!") == ""
+    assert hammerdb.unsafe_password_chars("Str0ng!Pa%w-rd#1@") == ""
+    assert hammerdb.unsafe_password_chars("Str0ng!Pa$$ word") == " $"
+    for c in '[]{}\\";\t':
+        assert hammerdb.unsafe_password_chars(f"abc{c}1A") == c
