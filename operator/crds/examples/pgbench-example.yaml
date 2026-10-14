@@ -13,7 +13,6 @@ spec:
     instancesPerNode: 2
     storageClass: standard
     storageSize: 50Gi
-    credentialsSecret: sherlock-pg-creds
     storagePlugin: generic
     partitionedTables: false
     volumes:

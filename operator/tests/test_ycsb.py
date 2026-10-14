@@ -28,9 +28,9 @@ def test_run_uses_workload_file_name_and_env_credentials():
     assert cmd[:2] == ["bash", "-c"]
     args = _args(cmd[2])
     assert args == ["./run_ycsb", "mongodb", "run", "10.0.0.9", "workloade", "16",
-                    "$SHERLOCK_DB_USER_URL", "$SHERLOCK_DB_PASSWORD_URL", "$SHERLOCK_DB_NAME",
+                    "$SHERLOCK_DB_USER", "$SHERLOCK_DB_PASSWORD", "$SHERLOCK_DB_NAME",
                     "100000", "5000000", "zipfian", "0", "0", "60"]
-    assert '"$SHERLOCK_DB_PASSWORD_URL"' in cmd[2]   # expanded by the shell
+    assert '"$SHERLOCK_DB_PASSWORD"' in cmd[2]   # expanded by the shell
 
 
 def test_workload_e_keeps_its_scan_mix():
@@ -46,7 +46,7 @@ def test_prepare_drops_loads_and_verifies_count():
     assert lines.index(cleanup) < lines.index(prepare)
     assert _args(prepare)[5] == "6"                     # loader threads = client CPUs
     assert "db.usertable.count()" in script
-    assert ('"mongodb://${SHERLOCK_DB_USER_URL}:${SHERLOCK_DB_PASSWORD_URL}'
+    assert ('"mongodb://${SHERLOCK_DB_USER}:${SHERLOCK_DB_PASSWORD}'
             '@10.0.0.9:27017/${SHERLOCK_DB_NAME}"') in script
     assert '"$count" != "100000"' in script
 

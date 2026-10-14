@@ -37,7 +37,7 @@ from src.plugins.storage.generic import (
 )
 from src.parsers.base import parse_storage_stats
 from src.parsers.aggregate import aggregate_results
-from src.utils.credentials import write_suite_secret, client_secret_env
+from src.utils.credentials import client_secret_env, DEFAULT_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -159,17 +159,13 @@ def deploy_db_infrastructure(
 
     Replaces create_databases + wait logic.
     """
-    # Store credentials in status (non-sensitive fields only — password excluded)
-    # Handlers access username/dbName from status; password passed via Secret ref
+    # Non-sensitive fields only; pods and Jobs read the password from the Secret
     patch.status["dbCredentials"] = {
-        "username": db_credentials.get("username", ""),
-        "dbName":   db_credentials.get("dbName", ""),
-        # password intentionally not stored in status — handlers re-resolve from Secret
+        "secret":   db_credentials["secret"],
+        "username": db_credentials["username"],
+        "dbName":   db_credentials["dbName"],
     }
     db_spec = spec["database"]
-    # Database pods and benchmark Jobs read passwords only from this Secret
-    secret_name = write_suite_secret(name, namespace, db_spec["type"],
-                                     db_credentials, owner)
     vol = volumes.settings(db_spec, default_prefix=db_spec["type"])
     run_matrix = patch.status.get("runMatrix") or []
     first_params = run_matrix[0]["params"] if run_matrix else {}
@@ -199,8 +195,7 @@ def deploy_db_infrastructure(
             name_prefix=vol["namePrefix"],
             on_create=vol["onCreate"],
             dataset=volumes.dataset_params(suite_kind, first_params),
-            sa_password=db_credentials.get("saPassword"),
-            credentials_secret=secret_name,
+            credentials_secret=db_credentials["secret"],
         )
     except volumes.VolumesBusy as e:
         logger.info(f"[{name}] Waiting: {e}")
@@ -258,7 +253,7 @@ def run_next_benchmark(
     build_benchmark_command(params, db_ip) → list of strings (the container command)
       params also carries _dbType, _username, _dbName and _clientCpus.
       Passwords are not passed: the Jobs get them as environment variables
-      from the suite's credentials Secret (credentials.CLIENT_ENV), and the
+      from the credentials Secret (credentials.CLIENT_ENV), and the
       commands refer to those variables.
     Prepare and benchmark Jobs use execution.clientResources (see
     client_resources).
@@ -286,7 +281,9 @@ def run_next_benchmark(
 
     run_name = next_run["name"]
     params   = _command_params(spec, status, next_run["params"])
-    secret_env = client_secret_env(suite_name, db_spec.get("type", "postgresql"))
+    secret_env = client_secret_env(
+        (status.get("dbCredentials") or {}).get("secret") or DEFAULT_SECRET,
+        db_spec.get("type", "postgresql"))
     suite_uid = ((owner or {}).get("metadata") or {}).get("uid", "")
     # Unique per suite instance, run and retry attempt
     run_key  = f"{suite_uid}/{run_name}/{next_run.get('retryCount', 0)}"

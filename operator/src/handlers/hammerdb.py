@@ -31,18 +31,6 @@ PLURAL  = "sherlockhammerdbsuites"
 
 SQLCMD = "/opt/mssql-tools/bin/sqlcmd"
 
-# HammerDB 3.3 pastes the sa password into the TCL it generates for each
-# virtual user (unquoted in "do_tpcc ... $mssqls_pass ...", inside quotes in
-# 'set pwd "..."') and into the ODBC connection string ("...;PWD=..."), so
-# these characters break the schema build or the run.
-_HAMMERDB_UNSAFE_PASSWORD = re.compile(r'[\s$\[\]{}\\";]')
-
-
-def unsafe_password_chars(password: str) -> str:
-    """Characters in password that HammerDB cannot handle ("" if none)."""
-    return "".join(sorted(set(_HAMMERDB_UNSAFE_PASSWORD.findall(password))))
-
-
 @kopf.on.create(GROUP, VERSION, KIND)
 def on_create(name, namespace, spec, patch, body, **kwargs):
     logger.info(f"[hammerdb] Suite {name} created in {namespace}")
@@ -50,14 +38,6 @@ def on_create(name, namespace, spec, patch, body, **kwargs):
     db_type = spec.get("database", {}).get("type", "mssql")   # CRD allows only mssql
     secret_name = spec.get("database", {}).get("credentialsSecret")
     credentials = resolve_credentials(db_type, namespace, secret_name)
-    bad = unsafe_password_chars(credentials.get("saPassword") or "")
-    if bad:
-        message = (f"saPassword in credentialsSecret {secret_name!r} contains characters "
-                   f"HammerDB cannot handle: {bad!r} (whitespace, $ [ ] {{ }} \\ \" ;)")
-        logger.error(f"[hammerdb] {name}: {message}")
-        kopf.warn(body, reason="InvalidCredentials", message=message)
-        patch.status["phase"] = "Failed"
-        return
     deploy_db_infrastructure(name, namespace, spec, patch, credentials,
                              owner=body, suite_kind=KIND)
     patch.status["phase"] = "Ready"
@@ -161,7 +141,7 @@ diset tpcc mssqls_num_vu {min(warehouses, params.get('_clientCpus', 1))}
 buildschema
 while {{![vucomplete]}} {{ after 5000; update }}
 """
-    # sqlcmd reads the password from SQLCMDPASSWORD (suite credentials Secret)
+    # sqlcmd reads the password from SQLCMDPASSWORD (credentials Secret)
     sqlcmd = f"{SQLCMD} -b -S {shlex.quote(db_ip + ',1433')} -U sa"
     drop = (f"IF DB_ID('{db_name}') IS NOT NULL BEGIN "
             f"ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "

@@ -920,7 +920,7 @@ def create_secret(
 ) -> client.V1Secret:
     """
     Create (or replace) an Opaque Secret.
-    Used for the per-suite database credentials.
+    Used for the default database credentials Secret.
     data values should be plain strings (base64 encoding is handled automatically).
     owner: suite CR that owns the Secret (garbage-collected with it).
     """

@@ -89,11 +89,3 @@ class TestParser:
 
 def test_stats_cover_rampup_and_measurement():
     assert _get_runtime_secs({"testMins": 3, "rampupMins": 1}, {}) == 240
-
-
-def test_unsafe_password_characters():
-    assert hammerdb.unsafe_password_chars("Sherlock1!") == ""
-    assert hammerdb.unsafe_password_chars("Str0ng!Pa%w-rd#1@") == ""
-    assert hammerdb.unsafe_password_chars("Str0ng!Pa$$ word") == " $"
-    for c in '[]{}\\";\t':
-        assert hammerdb.unsafe_password_chars(f"abc{c}1A") == c

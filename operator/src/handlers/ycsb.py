@@ -120,8 +120,7 @@ def _run_ycsb(action: str, params: dict, db_ip: str, threads: int) -> str:
     """One run_ycsb invocation. The image's workload files are workload<a-f>."""
     workload = params.get("workload", "a")
     read_prop, update_prop = WORKLOAD_PROPS.get(workload, ("0.5", "0.5"))
-    # run_ycsb builds mongodb://user:password@host/db itself, so it gets the
-    # URL-encoded credentials, from the Job's environment
+    # Credentials come from the Job's environment
     head = shlex.join(["./run_ycsb", "mongodb", action, db_ip, f"workload{workload}",
                        str(threads)])
     tail = shlex.join([
@@ -129,11 +128,11 @@ def _run_ycsb(action: str, params: dict, db_ip: str, threads: int) -> str:
         params.get("requestDistribution", "uniform"), read_prop, update_prop,
         str(params.get("maxExecutionTime", 120)),
     ])
-    return (f'{head} "$SHERLOCK_DB_USER_URL" "$SHERLOCK_DB_PASSWORD_URL" '
+    return (f'{head} "$SHERLOCK_DB_USER" "$SHERLOCK_DB_PASSWORD" '
             f'"$SHERLOCK_DB_NAME" {tail}')
 
 
 def _mongo_url(db_ip: str) -> str:
     """Shell word: mongodb:// URL built from the Job's environment."""
-    return ('"mongodb://${SHERLOCK_DB_USER_URL}:${SHERLOCK_DB_PASSWORD_URL}'
+    return ('"mongodb://${SHERLOCK_DB_USER}:${SHERLOCK_DB_PASSWORD}'
             f'@{db_ip}:27017/${{SHERLOCK_DB_NAME}}"')

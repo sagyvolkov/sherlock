@@ -103,8 +103,9 @@ spec:
                     credentialsSecret:
                       type: string
                       description: >
-                        Name of a k8s Secret in the same namespace containing
-                        keys: username, password, dbName (and saPassword for mssql).
+                        Secret with keys username, password, dbName (default:
+                        sherlock-db-credentials, created with defaults if missing).
+                        MSSQL uses the password with user sa and database tpcc.
                         If omitted, default dev credentials are used — not for production.
                     storagePlugin:
                       type: string

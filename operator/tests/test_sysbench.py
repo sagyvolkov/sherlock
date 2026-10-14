@@ -13,7 +13,9 @@ import base64
 import shlex
 
 import pytest
+import kopf
 from kubernetes import client
+from kubernetes.client.rest import ApiException
 
 from src.handlers import base, sysbench
 from src.utils import credentials
@@ -103,43 +105,56 @@ class TestClientResources:
         assert base.client_cpus({"execution": {"clientResources": res}}) == cpus
 
 
-def test_secret_values_are_base64_decoded(monkeypatch):
-    enc = lambda v: base64.b64encode(v.encode()).decode()
-    secret = client.V1Secret(data={"username": enc("bench"), "password": enc("s3cret"),
-                                   "dbName": enc("sb")})
+class FakeCore:
+    def __init__(self, data=None):
+        self.data, self.created = data, None
 
-    class FakeCore:
-        def read_namespaced_secret(self, name, namespace):
-            return secret
-
-    monkeypatch.setattr(credentials.client, "CoreV1Api", FakeCore)
-    assert credentials.resolve("mysql", "sherlock", "my-creds") == {
-        "username": "bench", "password": "s3cret", "dbName": "sb"}
+    def read_namespaced_secret(self, name, namespace):
+        if self.data is None:
+            raise ApiException(status=404)
+        enc = lambda v: base64.b64encode(v.encode()).decode()
+        return client.V1Secret(data={k: enc(v) for k, v in self.data.items()})
 
 
-class TestSuiteSecret:
-    def test_secret_content_and_client_env(self, monkeypatch):
-        written = {}
+class TestCredentials:
+    def test_secret_values_are_base64_decoded(self, monkeypatch):
+        core = FakeCore({"username": "bench", "password": "s3cret", "dbName": "sb"})
+        monkeypatch.setattr(credentials.client, "CoreV1Api", lambda: core)
+        assert credentials.resolve("mysql", "sherlock", "my-creds") == {
+            "secret": "my-creds", "username": "bench", "password": "s3cret", "dbName": "sb"}
+
+    def test_mssql_uses_sa_and_tpcc(self, monkeypatch):
+        core = FakeCore({"username": "bench", "password": "S3cret!x", "dbName": "sb"})
+        monkeypatch.setattr(credentials.client, "CoreV1Api", lambda: core)
+        assert credentials.resolve("mssql", "sherlock", None) == {
+            "secret": "sherlock-db-credentials", "username": "sa",
+            "password": "S3cret!x", "dbName": "tpcc"}
+
+    def test_default_secret_created_when_missing(self, monkeypatch):
+        created = {}
+        monkeypatch.setattr(credentials.client, "CoreV1Api", lambda: FakeCore())
         monkeypatch.setattr("src.utils.k8s.create_secret",
-                            lambda name, ns, data, owner=None, labels=None: written.update(
-                                name=name, data=data, owner=owner))
-        owner = {"metadata": {"name": "s1", "uid": "u"}}
-        name = credentials.write_suite_secret(
-            "s1", "sherlock", "mssql",
-            {"username": "sa", "password": "p w@x", "dbName": "tpcc", "saPassword": "Sa!1"}, owner)
-        assert name == written["name"] == "s1-db-credentials"
-        assert written["owner"] is owner
-        assert written["data"]["passwordUrl"] == "p%20w%40x"
-        assert written["data"]["saPassword"] == "Sa!1"
-        env = credentials.client_secret_env("s1", "mssql")
-        assert env["SHERLOCK_DB_PASSWORD"] == ("s1-db-credentials", "password")
-        assert env["SQLCMDPASSWORD"] == ("s1-db-credentials", "saPassword")
-        assert "SQLCMDPASSWORD" not in credentials.client_secret_env("s1", "mysql")
+                            lambda name, ns, data, owner=None, labels=None: created.update(
+                                name=name, data=data))
+        creds = credentials.resolve("postgresql", "sherlock", None)
+        assert created == {"name": "sherlock-db-credentials", "data": credentials.DEFAULTS}
+        assert creds["password"] == credentials.DEFAULTS["password"]
+
+    def test_named_secret_must_exist(self, monkeypatch):
+        monkeypatch.setattr(credentials.client, "CoreV1Api", lambda: FakeCore())
+        with pytest.raises(kopf.PermanentError):
+            credentials.resolve("mysql", "sherlock", "nope")
+
+    def test_client_env(self):
+        env = credentials.client_secret_env("sherlock-db-credentials", "mssql")
+        assert env["SHERLOCK_DB_PASSWORD"] == ("sherlock-db-credentials", "password")
+        assert env["SQLCMDPASSWORD"] == ("sherlock-db-credentials", "password")
+        assert "SQLCMDPASSWORD" not in credentials.client_secret_env("s", "mysql")
 
     def test_database_pods_get_passwords_from_secret(self):
         from src.db.deploy import _build_env_vars
         for db in ("postgresql", "mysql", "mssql", "mongodb"):
-            env = _build_env_vars(db, "u", "d", "s1-db-credentials")
+            env = _build_env_vars(db, "u", "d", "sherlock-db-credentials")
             secret_refs = {k for k, v in env.items() if isinstance(v, dict)}
             plain = {k: v for k, v in env.items() if not isinstance(v, dict)}
             assert secret_refs, db
