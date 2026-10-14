@@ -43,7 +43,7 @@
 # type: ArtifactSpec
 # fields:
 #   collectStats:       bool (default true)
-#   compression:        gzip | zstd | none (default gzip)
+#   compression:        gzip | none (default gzip)
 #   destination:
 #     type:             pvc | s3 | local
 #     pvc:

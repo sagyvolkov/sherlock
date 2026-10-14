@@ -338,7 +338,7 @@ spec:
                         result.storageByNode.
                     compression:
                       type: string
-                      enum: [gzip, zstd, none]
+                      enum: [gzip, none]
                       default: gzip
                     destination:
                       type: object

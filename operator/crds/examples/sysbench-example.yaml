@@ -30,7 +30,7 @@ spec:
     reportInterval: 10
   artifacts:
     collectStats: true
-    compression: zstd
+    compression: gzip
     destination:
       type: pvc
       pvc:

@@ -53,7 +53,7 @@ def build_bundle(
     Returns the tarball as bytes — the caller writes it to the
     configured destination (PVC path, S3, or emptyDir).
 
-    compression: "gzip" (default), "zstd" (faster, better ratio), "none"
+    compression: "gzip" (default) or "none"
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         run_dir   = os.path.join(tmpdir, run_name)
@@ -112,7 +112,6 @@ def _write(path: str, content: str):
 
 def _tar_mode(compression: str) -> str:
     if compression == "gzip": return "w:gz"
-    if compression == "zstd": return "w"    # tarfile doesn't natively support zstd; fallback to uncompressed
     return "w"                               # "none"
 
 
