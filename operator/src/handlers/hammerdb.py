@@ -38,12 +38,7 @@ SQLCMD = "/opt/mssql-tools/bin/sqlcmd"
 def on_create(name, namespace, spec, patch, body, **kwargs):
     logger.info(f"[hammerdb] Suite {name} created in {namespace}")
     initialize_suite(name, namespace, spec, patch, suite_kind=KIND)
-    db_type = spec.get("database", {}).get("type", "mssql")
-    if db_type != "mssql":
-        # The CRD allows mysql, but only the MSSQL TPC-C scripts exist so far
-        logger.error(f"[hammerdb] {name}: HammerDB on {db_type} is not implemented")
-        patch.status["phase"] = "Failed"
-        return
+    db_type = spec.get("database", {}).get("type", "mssql")   # CRD allows only mssql
     secret_name = spec.get("database", {}).get("credentialsSecret")
     credentials = resolve_credentials(db_type, namespace, secret_name)
     deploy_db_infrastructure(name, namespace, spec, patch, credentials,
