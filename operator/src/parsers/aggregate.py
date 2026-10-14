@@ -10,7 +10,8 @@ Rules, chosen by metric name so every benchmark parser works unchanged:
     The run's throughput is the cluster-wide total.
   - Average latencies (keys containing "Avg"): mean weighted by each
     instance's throughput, which equals the per-operation mean when all
-    instances ran for the same duration.
+    instances ran for the same duration. fio's readLat*/writeLat* use that
+    direction's IOPS as the weight.
   - latencyStddevMs: pooled standard deviation across instances, using the
     matching latencyAvgMs values and throughput weights.
   - Percentiles and maxima (P50/P95/P99/P999, "Max"): the worst instance.
@@ -69,7 +70,7 @@ def aggregate_results(per_instance: list[dict]) -> dict:
         elif key == "latencyStddevMs":
             combined[key] = _pooled_stddev(results, weights)
         elif "Avg" in key:
-            combined[key] = _weighted_mean(present)
+            combined[key] = _weighted_mean(_reweight_by_direction(key, results, present))
         else:
             combined[key] = round(sum(values) / len(values), 3)
 
@@ -82,6 +83,19 @@ def _weight(result: dict) -> float:
         if isinstance(value, (int, float)) and value > 0:
             return float(value)
     return 1.0
+
+
+def _reweight_by_direction(key: str, results: list[dict],
+                           present: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Use readIops / writeIops as the weight for fio read*/write* latencies."""
+    direction = next((d for d in ("read", "write") if key.startswith(d)), None)
+    if direction is None:
+        return present
+    rows = [(r[key], r.get(f"{direction}Iops")) for r in results
+            if isinstance(r.get(key), (int, float))]
+    if all(isinstance(w, (int, float)) for _, w in rows):
+        return [(v, float(w)) for v, w in rows]
+    return present
 
 
 def _weighted_mean(present: list[tuple[float, float]]) -> float:

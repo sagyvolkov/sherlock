@@ -521,7 +521,12 @@ spec:
                             description: "Aggregate read bandwidth in MB/s"
                           readLatAvgUs:
                             type: number
-                            description: "Average read completion latency in microseconds"
+                            description: >
+                              Average read latency in microseconds. Average and
+                              percentiles come from the same fio latency: completion
+                              latency (clat) by default, total latency (lat) when fio
+                              runs with lat_percentiles=1. Across PVCs, averages are
+                              IOPS-weighted and percentiles are the slowest PVC's.
                           readLatP50Us:
                             type: number
                           readLatP95Us:
@@ -539,6 +544,7 @@ spec:
                             type: number
                           writeLatAvgUs:
                             type: number
+                            description: "Average write latency in microseconds (same source as readLatAvgUs)"
                           writeLatP50Us:
                             type: number
                           writeLatP95Us:

@@ -313,25 +313,48 @@ def _parse_fio_json(data: dict) -> dict:
     result["writeBwMBs"]  = round(total_w_bw / 1024, 2)
     result["totalBwMBs"]  = round((total_r_bw + total_w_bw) / 1024, 2)
 
-    # Latency from first job (percentiles are per-job in fio JSON)
-    # lat_ns is completion latency; clat_ns is completion latency without submission
-    # We use lat_ns to match what users care about end-to-end
+    # Latency. fio reports percentiles only for completion latency (clat_ns)
+    # unless the job sets lat_percentiles=1, which adds them to total latency
+    # (lat_ns = submission + completion). Use lat_ns when it has percentiles,
+    # otherwise clat_ns, and take the average from the same source so the
+    # average and percentiles describe the same latency.
+    # Several job entries (no --group_reporting): averages weighted by that
+    # direction's IOPS, percentiles from the slowest job (see aggregate.py).
     def _ns_to_us(ns: float) -> float:
         return round(ns / 1000, 2)
 
-    j0 = jobs[0]
-    for rw, key_prefix in [("read", "read"), ("write", "write")]:
-        lat = j0.get(rw, {}).get("lat_ns", {})
-        mean = lat.get("mean", 0)
-        pct  = lat.get("percentile", {})
+    for rw in ("read", "write"):
+        stats = []        # (latency dict, iops) for jobs that did this kind of IO
+        for j in jobs:
+            side = j.get(rw, {})
+            if not side.get("iops"):
+                continue
+            lat = side.get("lat_ns") or {}
+            if not lat.get("percentile"):
+                lat = side.get("clat_ns") or lat
+            stats.append((lat, side["iops"]))
+        if not stats:
+            continue
+
+        weight = sum(iops for _, iops in stats)
+        mean = sum(lat.get("mean", 0) * iops for lat, iops in stats) / weight
         if mean:
-            result[f"{key_prefix}LatAvgUs"] = _ns_to_us(mean)
-        if "50.000000"  in pct: result[f"{key_prefix}LatP50Us"]  = _ns_to_us(pct["50.000000"])
-        if "95.000000"  in pct: result[f"{key_prefix}LatP95Us"]  = _ns_to_us(pct["95.000000"])
-        if "99.000000"  in pct: result[f"{key_prefix}LatP99Us"]  = _ns_to_us(pct["99.000000"])
-        if "99.900000"  in pct: result[f"{key_prefix}LatP999Us"] = _ns_to_us(pct["99.900000"])
+            result[f"{rw}LatAvgUs"] = _ns_to_us(mean)
+        for pct_key, name in _FIO_PERCENTILES:
+            values = [lat["percentile"][pct_key] for lat, _ in stats
+                      if pct_key in (lat.get("percentile") or {})]
+            if values:
+                result[f"{rw}Lat{name}Us"] = _ns_to_us(max(values))
 
     return result
+
+
+_FIO_PERCENTILES = (
+    ("50.000000", "P50"),
+    ("95.000000", "P95"),
+    ("99.000000", "P99"),
+    ("99.900000", "P999"),
+)
 
 
 def _parse_fio_normal(text: str) -> dict:

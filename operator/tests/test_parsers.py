@@ -13,6 +13,8 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import json
+
 import pytest
 from src.parsers.benchmarks import (
     parse_pgbench, parse_sysbench, parse_hammerdb,
@@ -246,7 +248,8 @@ FIO_JSON_OUTPUT = """
         "io_kbytes" : 4194304,
         "bw" : 34952,
         "iops" : 8738.23,
-        "lat_ns" : {
+        "slat_ns" : {"min" : 2000, "max" : 90000, "mean" : 11428.57, "stddev" : 3000.0},
+        "clat_ns" : {
           "min" : 12345,
           "max" : 9876543,
           "mean" : 228571.43,
@@ -270,14 +273,15 @@ FIO_JSON_OUTPUT = """
             "99.950000" : 1220608,
             "99.990000" : 2179072
           }
-        }
+        },
+        "lat_ns" : {"min" : 14345, "max" : 9880000, "mean" : 240000.0, "stddev" : 45700.0}
       },
       "write" : {
         "io_bytes" : 1431306240,
         "io_kbytes" : 1397760,
         "bw" : 11648,
         "iops" : 2912.08,
-        "lat_ns" : {
+        "clat_ns" : {
           "min" : 23456,
           "max" : 8765432,
           "mean" : 342857.14,
@@ -288,12 +292,31 @@ FIO_JSON_OUTPUT = """
             "99.000000" : 798720,
             "99.900000" : 1515520
           }
-        }
+        },
+        "lat_ns" : {"min" : 25456, "max" : 8770000, "mean" : 360000.0, "stddev" : 67900.0}
       }
     }
   ]
 }
 """
+
+# Real fio 3.37 output (128k sequential read, --group_reporting) captured
+# from a run on OCP with Lightbits NVMe-oF
+FIO_OCP_OUTPUT = open(os.path.join(os.path.dirname(__file__), "fixtures",
+                                   "fio-3.37-read-128k-ocp.json")).read()
+
+
+def _fio_job(read_iops, clat_mean, p99, write_iops=0.0):
+    """Minimal fio job entry with read clat percentiles."""
+    return {
+        "read": {"iops": read_iops, "bw": 1000,
+                 "clat_ns": {"mean": clat_mean,
+                             "percentile": {"50.000000": clat_mean, "99.000000": p99}},
+                 "lat_ns": {"mean": clat_mean + 10000}},
+        "write": {"iops": write_iops, "bw": 0,
+                  "clat_ns": {"mean": 0, "N": 0}, "lat_ns": {"mean": 0, "N": 0}},
+    }
+
 
 FIO_NORMAL_OUTPUT = """
 randrw: (g=0): rw=randrw, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=4
@@ -333,6 +356,39 @@ class TestParseFio:
         assert result.get("readLatP99Us") == pytest.approx(520.192, abs=1.0)
         # p99.9: 1011712 ns → 1011.712 us
         assert result.get("readLatP999Us") == pytest.approx(1011.712, abs=1.0)
+
+    def test_json_avg_latency_uses_same_source_as_percentiles(self):
+        # Percentiles exist only under clat_ns, so the average is clat too
+        result = parse_fio(FIO_JSON_OUTPUT, {})
+        assert result["readLatAvgUs"] == pytest.approx(228.57, abs=0.01)
+        assert result["writeLatAvgUs"] == pytest.approx(342.86, abs=0.01)
+        assert result["writeLatP99Us"] == pytest.approx(798.72, abs=0.01)
+
+    def test_json_prefers_total_latency_when_it_has_percentiles(self):
+        # fio --lat_percentiles=1 puts percentiles under lat_ns
+        data = json.loads(FIO_JSON_OUTPUT)
+        data["jobs"][0]["read"]["lat_ns"]["percentile"] = {"99.000000": 600000}
+        result = parse_fio(json.dumps(data), {})
+        assert result["readLatP99Us"] == pytest.approx(600.0)
+        assert result["readLatAvgUs"] == pytest.approx(240.0)
+
+    def test_json_real_ocp_output(self):
+        result = parse_fio(FIO_OCP_OUTPUT, {})
+        assert result["readIops"] == pytest.approx(13761.02, abs=0.01)
+        assert result["readLatAvgUs"] == pytest.approx(1117.1, abs=0.1)
+        assert result["readLatP50Us"] > 0
+        assert result["readLatP95Us"] <= result["readLatP99Us"] <= result["readLatP999Us"]
+        # No writes in a pure read run: no write latency keys
+        assert not any(k.startswith("writeLat") for k in result)
+
+    def test_json_multiple_jobs_weight_avg_and_take_worst_percentile(self):
+        data = {"jobs": [_fio_job(3000, 100000, 400000),
+                         _fio_job(1000, 200000, 900000)]}
+        result = parse_fio(json.dumps(data), {})
+        assert result["readIops"] == pytest.approx(4000)
+        # (3000*100 + 1000*200) / 4000 = 125 us
+        assert result["readLatAvgUs"] == pytest.approx(125.0)
+        assert result["readLatP99Us"] == pytest.approx(900.0)
 
     def test_normal_format_fallback(self):
         """Falls back to normal format parsing when JSON not present."""

@@ -132,3 +132,14 @@ def test_job_state_from_conditions():
         [{"type": "Failed", "status": "True"}]) == "Failed"
     assert job_state_from_conditions(
         [{"type": "Failed", "status": "False"}]) == "Active"
+
+
+def test_fio_direction_latency_weighted_by_that_directions_iops():
+    a = {"readIops": 900, "writeIops": 100, "totalIops": 1000,
+         "readLatAvgUs": 100.0, "writeLatAvgUs": 500.0}
+    b = {"readIops": 100, "writeIops": 900, "totalIops": 1000,
+         "readLatAvgUs": 300.0, "writeLatAvgUs": 700.0}
+    combined = aggregate_results([a, b])
+    # read: (900*100 + 100*300) / 1000 = 120; write: (100*500 + 900*700) / 1000 = 680
+    assert combined["readLatAvgUs"] == pytest.approx(120.0)
+    assert combined["writeLatAvgUs"] == pytest.approx(680.0)
