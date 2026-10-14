@@ -60,6 +60,8 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
             build_benchmark_command=_build_command,
             parse_results=parse_pgbench,
             benchmark_image=BENCHMARK_IMAGE,
+            suite_kind=KIND,
+            build_prepare_command=_build_prepare_command,
         )
 
 
@@ -123,6 +125,10 @@ def on_delete(name, namespace, spec, status, **kwargs):
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+# readWriteRatio → run_pgbench workload type
+_WORKLOAD_TYPES = {100: "readonly", 90: "90r10w", 70: "70r30w"}
+
+
 def _deploy(name, namespace, spec, patch):
     """Deploy PostgreSQL instances and transition to Ready."""
     secret_name = spec.get("database", {}).get("credentialsSecret")
@@ -149,15 +155,35 @@ def _build_command(params: dict, db_ip: str) -> list[str]:
     Replaces the prepare_run_command() function for pgbench in
     run_database_workload-parallel.
     """
+    # Map readWriteRatio to the run_pgbench workload type (its first argument):
+    # 100 = readonly (-S), 90/70 = the bundled mixed scripts,
+    # anything else falls through to pgbench's builtin TPC-B.
+    rw_ratio = params.get("readWriteRatio", 100)
+    action   = _WORKLOAD_TYPES.get(rw_ratio, "run")
+    return ["bash", "-c", _run_pgbench(action, params, db_ip)]
+
+
+def _build_prepare_command(params: dict, prev_params, db_ip: str):
+    """
+    Build the `run_pgbench prepare` command (pgbench -i) for a run.
+
+    Returns None when the previous run used the same scaleFactor, since the
+    tables it left behind can be reused.
+    """
+    scale = params.get("scaleFactor", 100)
+    if prev_params is not None and prev_params.get("scaleFactor", 100) == scale:
+        return None
+    return ["bash", "-c", _run_pgbench("prepare", params, db_ip)]
+
+
+def _run_pgbench(action: str, params: dict, db_ip: str) -> str:
+    """Build the run_pgbench command line for the given action."""
     clients   = params.get("clients", 2)
     threads   = params.get("threads", 4)
     duration  = params.get("duration", 120)
     rw_ratio  = params.get("readWriteRatio", 100)
     scale     = params.get("scaleFactor", 100)
-    protocol  = params.get("protocol", "simple")
 
-    # Map readWriteRatio to pgbench flags
-    # 100 = read-only (-S), 0 = write-only, other = custom script
     read_only = "true" if rw_ratio == 100 else "false"
 
     # Credentials are passed in via params dict (populated from status.credentials
@@ -166,11 +192,9 @@ def _build_command(params: dict, db_ip: str) -> list[str]:
     password = params.get("_password", "sherlock")
     db_name  = params.get("_dbName",   "sherlock")
 
-    command = (
-        f"./run_pgbench run {db_ip} {clients} {threads} "
+    return (
+        f"./run_pgbench {action} {db_ip} {clients} {threads} "
         f"time {duration} false false {scale} "
         f"{username} {password} {db_name} "
         f"10 {read_only}"
     )
-
-    return ["bash", "-c", command]

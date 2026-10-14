@@ -444,6 +444,16 @@ spec:
                         default: 0
                       artifactPath:
                         type: string
+                      benchmarkJobs:
+                        type: array
+                        description: Names of the benchmark Jobs launched for this run.
+                        items:
+                          type: string
+                      statJobs:
+                        type: array
+                        description: Names of the stat collector Jobs launched for this run.
+                        items:
+                          type: string
                       result:
                         type: object
                         description: >

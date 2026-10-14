@@ -48,6 +48,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
             suite_name=name, namespace=namespace, spec=spec, status=status,
             patch=patch, build_benchmark_command=_build_command,
             parse_results=parse_sysbench, benchmark_image=BENCHMARK_IMAGE,
+            suite_kind=KIND,
         )
 
 

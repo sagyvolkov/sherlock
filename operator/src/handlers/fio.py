@@ -68,7 +68,7 @@ def on_create(name, namespace, spec, patch, **kwargs):
     patch.status["phase"] = "Ready"
     patch.status["workerNodes"] = worker_nodes
     patch.status["pvcNames"] = pvc_names
-    patch.status["summary"]["totalPvcsProvisioned"] = total
+    patch.status["summary"] = {"totalPvcsProvisioned": total}
 
 
 @kopf.on.field(GROUP, VERSION, KIND, field='status.phase')

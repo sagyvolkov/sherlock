@@ -1,0 +1,36 @@
+apiVersion: sherlock.io/v1alpha1
+kind: SherlockPgbenchSuite
+metadata:
+  name: pgbench-smoke-test
+  namespace: sherlock
+spec:
+  database:
+    type: postgresql
+    instancesPerNode: 1
+    storageClass: lb-replica3-xfs
+    storageSize: 20Gi
+    storagePlugin: generic
+    partitionedTables: false
+    # credentialsSecret omitted — uses defaults (sherlock/sherlock/sherlock)
+  execution:
+    order: sequential
+    sleepBetweenRuns: 10
+    failurePolicy: abortAll
+    timeoutPerRun: 10m
+  sweep:
+    clients:        [2]
+    threads:        [2]
+    readWriteRatio: [100]
+    scaleFactor:    [10]
+    duration:       [30]
+    protocol:       [simple]
+  artifacts:
+    collectStats: false
+    compression: gzip
+    destination:
+      type: local
+      local:
+        ttlHours: 24
+    retention:
+      keepLastN: 5
+      deleteWithSuite: false

@@ -18,6 +18,7 @@ This replaces the orchestration flow in:
   - print_results (Collecting phase)
 """
 
+import hashlib
 import logging
 import time
 from typing import Callable, Optional
@@ -44,6 +45,9 @@ LABEL_ROLE       = "sherlock.io/role"
 # Benchmark container image (shared across all DB benchmarks in v1)
 # Individual handlers can override this.
 BENCHMARK_IMAGE = "quay.io/sagyvolkov/benchmark-container:sherlock0.5"
+
+# Max time to wait for data preparation Jobs (e.g. pgbench -i) before a run
+PREPARE_TIMEOUT_SECS = 3600
 
 
 # ── Phase transitions ─────────────────────────────────────────────────────────
@@ -182,6 +186,10 @@ def run_next_benchmark(
     build_benchmark_command: Callable[[dict, str], list[str]],
     parse_results: Callable[[str, dict], dict],
     benchmark_image: str = BENCHMARK_IMAGE,
+    suite_kind: str = "",
+    build_prepare_command: Optional[
+        Callable[[dict, Optional[dict], str], Optional[list[str]]]
+    ] = None,
 ):
     """
     Phase: Ready/Sleeping → Running
@@ -191,6 +199,10 @@ def run_next_benchmark(
 
     build_benchmark_command(params, db_ip) → list of strings (the container command)
     parse_results(raw_log, params) → dict of result metrics
+    build_prepare_command(params, prev_params, db_ip) → container command that
+      loads the benchmark data (the "prepare" job type in
+      run_database_workload-parallel), or None if the data left by the
+      previous run (prev_params, None for the first run) can be reused.
     """
     run_matrix = status.get("runMatrix", [])
     execution  = spec.get("execution", {})
@@ -206,7 +218,7 @@ def run_next_benchmark(
     run_name = next_run["name"]
     params   = next_run["params"]
     patch.status["phase"] = "Running"
-    patch.status["summary"]["currentRunName"] = run_name
+    patch.status["summary"] = {**status.get("summary", {}), "currentRunName": run_name}
 
     # Mark this run as Running in the matrix
     _update_run_phase(patch, run_matrix, run_name, "Running",
@@ -215,6 +227,28 @@ def run_next_benchmark(
     # Get deployments from status (set during Deploying phase)
     deployments = status.get("deployments", [])
     worker_nodes = list({d["node"] for d in deployments})
+
+    # ── Prepare benchmark data ────────────────────────────────────────────────
+    # Blocks until done, before the stat collectors start, so that stats
+    # cover only the measured run.
+    if build_prepare_command is not None:
+        prepared = _prepare_databases(
+            suite_name=suite_name,
+            namespace=namespace,
+            spec=spec,
+            run_name=run_name,
+            deployments=deployments,
+            params=params,
+            prev_params=_previous_run_params(run_matrix, run_name),
+            build_prepare_command=build_prepare_command,
+            benchmark_image=benchmark_image,
+            suite_kind=suite_kind,
+        )
+        if not prepared:
+            _update_run_phase(patch, run_matrix, run_name, "Failed",
+                              end_time=_now())
+            patch.status["phase"] = "Failed"
+            return
 
     # ── Launch stat collectors ────────────────────────────────────────────────
     stat_jobs = {}
@@ -245,6 +279,7 @@ def run_next_benchmark(
 
         labels = {
             LABEL_SUITE: suite_name,
+            LABEL_KIND:  suite_kind,
             LABEL_RUN:   run_name,
             LABEL_ROLE:  "benchmark",
         }
@@ -401,6 +436,94 @@ def handle_run_completion(
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
+
+def _previous_run_params(run_matrix: list, run_name: str) -> Optional[dict]:
+    """Return the params of the last finished run before run_name, if any."""
+    prev = None
+    for run in run_matrix:
+        if run["name"] == run_name:
+            break
+        if run["phase"] in ("Completed", "Failed"):
+            prev = run.get("params", {})
+    return prev
+
+
+def _prepare_databases(
+    suite_name: str,
+    namespace: str,
+    spec: dict,
+    run_name: str,
+    deployments: list[dict],
+    params: dict,
+    prev_params: Optional[dict],
+    build_prepare_command: Callable[[dict, Optional[dict], str], Optional[list[str]]],
+    benchmark_image: str,
+    suite_kind: str,
+) -> bool:
+    """
+    Launch one prepare Job per database instance and block until all finish.
+    Returns False if any prepare Job failed or timed out.
+
+    Replaces the `-j prepare` invocation of run_database_workload-parallel.
+    """
+    # Run names are too long to embed in a Job name alongside the instance name
+    suffix = hashlib.sha1(run_name.encode()).hexdigest()[:8]
+    prepare_jobs = []
+    for dep in deployments:
+        command = build_prepare_command(params, prev_params, dep.get("ip", ""))
+        if command is None:
+            continue
+        job_name = f"{dep['name']}-prep-{suffix}"[:63]
+        # A leftover Job from an earlier attempt would be returned as-is by create_job
+        k8s.delete_job(job_name, namespace)
+        k8s.create_job(
+            name=job_name,
+            namespace=namespace,
+            image=benchmark_image,
+            command=command,
+            node_name=dep["node"],
+            labels={
+                LABEL_SUITE: suite_name,
+                LABEL_KIND:  suite_kind,
+                LABEL_RUN:   run_name,
+                LABEL_ROLE:  "prepare",
+            },
+            resources=spec.get("database", {}).get("resources", {}),
+        )
+        prepare_jobs.append(job_name)
+
+    if not prepare_jobs:
+        return True
+
+    logger.info(
+        f"[{suite_name}] Preparing data for {run_name}: {len(prepare_jobs)} jobs"
+    )
+    pending = set(prepare_jobs)
+    deadline = time.time() + PREPARE_TIMEOUT_SECS
+    while pending:
+        for job_name in sorted(pending):
+            job_status = k8s.get_job_status(job_name, namespace)
+            if job_status["failed"]:
+                logger.error(
+                    f"[{suite_name}] Prepare job {job_name} failed:\n"
+                    f"{k8s.get_job_pod_logs(job_name, namespace)[-2000:]}"
+                )
+                return False
+            if job_status["succeeded"]:
+                pending.discard(job_name)
+        if not pending:
+            break
+        if time.time() > deadline:
+            logger.error(
+                f"[{suite_name}] Prepare jobs timed out after "
+                f"{PREPARE_TIMEOUT_SECS}s: {sorted(pending)}"
+            )
+            return False
+        time.sleep(5)
+
+    logger.info(f"[{suite_name}] Data prepared for {run_name}")
+    return True
+
 
 def _start_next_or_finish(
     suite_name, namespace, spec, status, patch, parse_results

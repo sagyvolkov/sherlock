@@ -340,6 +340,16 @@ spec:
                         default: 0
                       artifactPath:
                         type: string
+                      benchmarkJobs:
+                        type: array
+                        description: Names of the benchmark Jobs launched for this run.
+                        items:
+                          type: string
+                      statJobs:
+                        type: array
+                        description: Names of the stat collector Jobs launched for this run.
+                        items:
+                          type: string
                       result:
                         type: object
                         properties:
@@ -365,6 +375,30 @@ spec:
                             type: number
                           p99LatencyMs:
                             type: number
+                deployments:
+                  type: array
+                  description: Database instances deployed by on_create.
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      node:
+                        type: string
+                      pvc:
+                        type: string
+                      index:
+                        type: integer
+                      ip:
+                        type: string
+                dbCredentials:
+                  type: object
+                  description: Non-sensitive DB connection fields (password is never stored).
+                  properties:
+                    username:
+                      type: string
+                    dbName:
+                      type: string
                 summary:
                   type: object
                   properties:
