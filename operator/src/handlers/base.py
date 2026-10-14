@@ -161,7 +161,6 @@ def deploy_db_infrastructure(
     """
     # Non-sensitive fields only; pods and Jobs read the password from the Secret
     patch.status["dbCredentials"] = {
-        "secret":   db_credentials["secret"],
         "username": db_credentials["username"],
         "dbName":   db_credentials["dbName"],
     }
@@ -282,7 +281,7 @@ def run_next_benchmark(
     run_name = next_run["name"]
     params   = _command_params(spec, status, next_run["params"])
     secret_env = client_secret_env(
-        (status.get("dbCredentials") or {}).get("secret") or DEFAULT_SECRET,
+        db_spec.get("credentialsSecret") or DEFAULT_SECRET,
         db_spec.get("type", "postgresql"))
     suite_uid = ((owner or {}).get("metadata") or {}).get("uid", "")
     # Unique per suite instance, run and retry attempt
