@@ -7,6 +7,8 @@ All orchestration is in handlers/base.py.
 """
 
 import logging
+import time
+
 import kopf
 
 from src.handlers.base import (
@@ -35,8 +37,9 @@ def on_create(name, namespace, spec, patch, body, **kwargs):
     Goes Pending → Provisioning (PVCs) → Ready → Running.
 
     PVCs are <namePrefix>-pvc-N (default prefix "fio") and are reused by a
-    later suite with the same layout, like database volumes. fio has no
-    prepare step, so the marker is written as soon as the PVCs are Bound.
+    later suite with the same layout, like database volumes. Their marker is
+    written once the volumes are prefilled (see _prefill), so reused volumes
+    are not prefilled again.
     """
     logger.info(f"[fio] Suite {name} created in {namespace}")
     from src.utils import k8s, volumes
@@ -81,8 +84,6 @@ def on_create(name, namespace, spec, patch, body, **kwargs):
     except volumes.VolumesBusy as e:
         logger.info(f"[fio] {name} waiting: {e}")
         raise kopf.TemporaryError(str(e), delay=60)
-    if not reused:
-        volumes.mark_prepared(namespace, pvc_names, layout)
 
     patch.status["phase"] = "Ready"
     patch.status["workerNodes"] = worker_nodes
@@ -102,8 +103,10 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
         return
 
     from src.utils import k8s
-    from src.plugins.storage.generic import launch_stat_collectors
-    from src.parsers.benchmarks import parse_fio
+    from src.plugins.storage.generic import (
+        launch_stat_collectors, stats_count, wait_for_collectors_running,
+        DEFAULT_STATS_INTERVAL,
+    )
 
     run_matrix   = status.get("runMatrix", [])
     next_run     = next((r for r in run_matrix if r["phase"] == "Pending"), None)
@@ -119,7 +122,6 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
     pvc_names    = status.get("pvcNames", [])
     storage      = spec["storage"]
     volume_mode  = storage.get("volumeMode", "Filesystem")
-    fio_per_worker = storage.get("fioPerWorker", 1)
 
     patch.status["phase"] = "Running"
     # Build updated summary by merging with existing status.summary
@@ -130,17 +132,24 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
     # Mark this run as Running in the matrix (prevents re-entry on next phase event)
     _update_run_phase(patch, run_matrix, run_name, "Running", start_time=_now())
 
+    # Fill the volumes once, before any measured run and without stats
+    if not _prefill(name, namespace, storage, status, worker_nodes, body):
+        _update_run_phase(patch, run_matrix, run_name, "Failed", end_time=_now())
+        patch.status["phase"] = "Failed"
+        return
+
     # Launch stat collectors
     stat_jobs = {}
     if spec.get("artifacts", {}).get("collectStats", True):
-        runtime = params.get("runtime", 60)
         stat_jobs = launch_stat_collectors(
             suite_name=name, run_name=run_name, namespace=namespace,
             worker_nodes=worker_nodes,
-            stats_count=(runtime + 10) // 10,
+            stats_interval=DEFAULT_STATS_INTERVAL,
+            stats_count=stats_count(params.get("runtime", 60)),
             owner=body,
             name_key=run_key,
         )
+        wait_for_collectors_running(stat_jobs, namespace)
 
     # Launch one fio Job per PVC
     timeout_secs = k8s.parse_duration_secs(
@@ -153,16 +162,10 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
         # Was f"{name}-fio-{run_name}-{j}"[:63], which cut off the PVC index
         # for long run names so every PVC's Job got the same name
         job_name  = k8s.job_name(f"{name}-fio-{j}", f"{run_key}/fio/{j}")
-        command   = _build_fio_command(params, volume_mode, pvc_name)
-
-        pvc_mounts = (
-            [{"pvc_name": pvc_name, "mount_path": "/data"}]
-            if volume_mode == "Filesystem" else []
-        )
 
         k8s.create_job(
             name=job_name, namespace=namespace,
-            image=FIO_IMAGE, command=command,
+            image=FIO_IMAGE, command=_build_fio_command(params, volume_mode),
             node_name=node_name,
             labels={
                 "sherlock.io/suite-name": name,
@@ -171,9 +174,9 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
                 "sherlock.io/role":       "benchmark",
             },
             resources=storage.get("resources", {}),
-            pvc_mounts=pvc_mounts,
             owner=body,
             active_deadline_seconds=timeout_secs,
+            **_volume_args(pvc_name, volume_mode),
         )
         benchmark_jobs.append(job_name)
 
@@ -181,7 +184,7 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwar
     _update_run_phase(
         patch, run_matrix, run_name, "Running",
         extra={"benchmarkJobs": benchmark_jobs,
-               "statJobs": list(stat_jobs.keys())}
+               "statJobs": list(stat_jobs.keys()), "statNodes": stat_jobs}
     )
 
     logger.info(f"[fio] Run {run_name} started on {len(pvc_names)} PVCs")
@@ -217,11 +220,27 @@ def on_delete(name, namespace, spec, status, meta, **kwargs):
     logger.info(f"[fio] Suite {name} deleted (volumes: {vol['onSuiteDelete']})")
 
 
-def _build_fio_command(params: dict, volume_mode: str, pvc_name: str) -> list[str]:
+# Where a PVC appears inside fio pods: a directory (Filesystem) or a raw
+# block device (Block)
+FIO_DIRECTORY = "/data"
+FIO_DEVICE    = "/dev/sherlock-data"
+
+
+def _volume_args(pvc_name: str, volume_mode: str) -> dict:
+    """create_job arguments that attach the PVC as a directory or raw device."""
+    if volume_mode == "Block":
+        return {"block_devices": [{"pvc_name": pvc_name, "device_path": FIO_DEVICE}]}
+    return {"pvc_mounts": [{"pvc_name": pvc_name, "mount_path": FIO_DIRECTORY}]}
+
+
+def _build_fio_command(params: dict, volume_mode: str) -> list[str]:
     """
     Build fio container command from sweep parameters.
-    Maps to: ./run_fio <rwmixwrite> <bs> <filename> <runtime> <jobs>
-                       <iodepth> <worksize> <device_type> <direct> <iopattern>
+    Maps to: /scripts/run_fio <rwmixwrite> <bs> <filename> <runtime> <jobs>
+                              <iodepth> <worksize> <device_type> <direct>
+                              <iopattern> <output_format>
+    FS mode uses the mounted directory; RAW mode the PVC's raw device
+    (--filename). workSize must not exceed the device size in RAW mode.
     """
     bs        = params.get("blockSize", "4k")
     rw        = params.get("rwMixWrite", 0)
@@ -232,7 +251,7 @@ def _build_fio_command(params: dict, volume_mode: str, pvc_name: str) -> list[st
     worksize  = params.get("workSize", "2048g")
     direct    = params.get("directIO", 1)
     dev_type  = "FS" if volume_mode == "Filesystem" else "RAW"
-    filename  = "/data" if volume_mode == "Filesystem" else f"/dev/{pvc_name}"
+    filename  = FIO_DIRECTORY if volume_mode == "Filesystem" else FIO_DEVICE
     output_fmt = params.get("outputFormat", "json")
     return [
         "/scripts/run_fio",
@@ -240,3 +259,72 @@ def _build_fio_command(params: dict, volume_mode: str, pvc_name: str) -> list[st
         str(jobs), str(iodepth), str(worksize), str(dev_type), str(direct), str(pattern),
         str(output_fmt),
     ]
+
+
+def _prefill(name, namespace, storage, status, worker_nodes, body) -> bool:
+    """
+    Write every raw-block volume end to end once (1M sequential, direct)
+    before the first measured run. Thin-provisioned storage (Lightbits)
+    allocates on first write, so measuring unwritten volumes would mostly
+    measure allocation and reads of never-written blocks.
+
+    Skipped when the volume markers show the volumes are already filled
+    (reused from an earlier suite, or an earlier run of this suite).
+    Filesystem volumes need no prefill: fio lays out its files itself.
+    Blocks until done, like the database prepare step.
+    """
+    from src.utils import k8s, volumes
+    from src.handlers.base import PREPARE_TIMEOUT_SECS
+
+    vol = status.get("volumes") or {}
+    pvc_names, layout = vol.get("pvcNames") or [], vol.get("layout")
+    if not pvc_names or not layout:
+        return True
+    if storage.get("volumeMode", "Filesystem") != "Block":
+        if not volumes.is_prepared(namespace, pvc_names, layout):
+            volumes.mark_prepared(namespace, pvc_names, layout)
+        return True
+    if volumes.is_prepared(namespace, pvc_names, layout):
+        logger.info(f"[fio] {name}: volumes already prefilled")
+        return True
+
+    volumes.clear_marker(namespace, pvc_names)
+    uid = body["metadata"]["uid"]
+    jobs = []
+    for j, pvc_name in enumerate(pvc_names):
+        job_name = k8s.job_name(f"{name}-prefill-{j}", f"{uid}/prefill/{j}")
+        k8s.create_job(
+            name=job_name, namespace=namespace, image=FIO_IMAGE,
+            command=["fio", "--name=prefill", f"--filename={FIO_DEVICE}",
+                     "--readwrite=write", "--bs=1M", "--direct=1",
+                     "--ioengine=libaio", "--iodepth=32", "--numjobs=1"],
+            node_name=worker_nodes[j % len(worker_nodes)],
+            labels={"sherlock.io/suite-name": name, "sherlock.io/role": "prepare"},
+            resources=storage.get("resources", {}),
+            owner=body,
+            active_deadline_seconds=PREPARE_TIMEOUT_SECS,
+            **_volume_args(pvc_name, "Block"),
+        )
+        jobs.append(job_name)
+
+    logger.info(f"[fio] {name}: prefilling {len(jobs)} volumes")
+    deadline = time.time() + PREPARE_TIMEOUT_SECS
+    pending = set(jobs)
+    while pending:
+        for job_name in sorted(pending):
+            state = k8s.get_job_state(job_name, namespace)
+            if state in ("Failed", "Missing"):
+                logger.error(f"[fio] {name}: prefill Job {job_name} {state.lower()}:\n"
+                             f"{k8s.get_job_pod_logs(job_name, namespace)[-2000:]}")
+                return False
+            if state == "Complete":
+                pending.discard(job_name)
+        if pending and time.time() > deadline:
+            logger.error(f"[fio] {name}: prefill timed out: {sorted(pending)}")
+            return False
+        if pending:
+            time.sleep(5)
+
+    volumes.mark_prepared(namespace, pvc_names, layout)
+    logger.info(f"[fio] {name}: volumes prefilled")
+    return True

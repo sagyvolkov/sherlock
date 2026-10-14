@@ -566,6 +566,8 @@ def create_job(
     owner: Optional[dict] = None,
     active_deadline_seconds: Optional[int] = None,
     configmap_mount: Optional[dict] = None,
+    block_devices: Optional[list[dict]] = None,
+    service_account: Optional[str] = None,
 ) -> client.V1Job:
     """
     Create a k8s Job.
@@ -576,6 +578,9 @@ def create_job(
     pvc_mounts: list of {"pvc_name": str, "mount_path": str, "read_only": bool}
     configmap_mount: {"mount_path": str, "items": [(configmap, key, file), ...]}
       projects keys of one or more ConfigMaps into one read-only directory
+    block_devices: list of {"pvc_name": str, "device_path": str} for
+      volumeMode=Block PVCs, exposed as raw devices (volumeDevices)
+    service_account: pod service account (default: the namespace default)
     ttl_seconds: auto-clean up the Job object after completion (default 1h)
     host_network: True only for stat collector pods (original used hostNetwork: true)
     owner: suite CR (kopf body) that owns the Job; sets ownerReferences
@@ -617,6 +622,17 @@ def create_job(
             ]),
         ))
 
+    volume_devices = []
+    for i, d in enumerate(block_devices or []):
+        vol_name = f"dev-{i}"
+        volume_devices.append(client.V1VolumeDevice(
+            name=vol_name, device_path=d["device_path"]))
+        volumes.append(client.V1Volume(
+            name=vol_name,
+            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                claim_name=d["pvc_name"]),
+        ))
+
     env = [
         client.V1EnvVar(name=k, value=str(v))
         for k, v in (env_vars or {}).items()
@@ -628,6 +644,7 @@ def create_job(
         image_pull_policy="Always",
         command=command,
         volume_mounts=volume_mounts,
+        volume_devices=volume_devices or None,
         env=env,
         resources=client.V1ResourceRequirements(
             requests={
@@ -647,6 +664,7 @@ def create_job(
         containers=[container],
         volumes=volumes,
         host_network=host_network,
+        service_account_name=service_account,
     )
 
     job = client.V1Job(
@@ -749,6 +767,13 @@ def get_job_pod_logs(job_name: str, namespace: str) -> str:
     except ApiException as e:
         logger.warning(f"Could not get logs for pod {pod_name}: {e}")
         return ""
+
+
+def get_job_pod_phase(job_name: str, namespace: str) -> Optional[str]:
+    """Phase of the Job's pod (Pending, Running, Succeeded, ...), or None."""
+    pods = client.CoreV1Api().list_namespaced_pod(
+        namespace, label_selector=f"job-name={job_name}").items
+    return pods[0].status.phase if pods else None
 
 
 def delete_job(name: str, namespace: str):

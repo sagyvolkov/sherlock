@@ -320,6 +320,13 @@ def _parse_fio_json(data: dict) -> dict:
     result["writeBwMBs"]  = round(total_w_bw / 1024, 2)
     result["totalBwMBs"]  = round((total_r_bw + total_w_bw) / 1024, 2)
 
+    # Totals over the run, comparable with the stats collectors' iostat totals
+    mib = 1024 * 1024
+    result["readMiB"]  = round(sum(j["read"].get("io_bytes", 0) for j in jobs) / mib, 2)
+    result["writeMiB"] = round(sum(j["write"].get("io_bytes", 0) for j in jobs) / mib, 2)
+    result["readIos"]  = sum(j["read"].get("total_ios", 0) for j in jobs)
+    result["writeIos"] = sum(j["write"].get("total_ios", 0) for j in jobs)
+
     # Latency. fio reports percentiles only for completion latency (clat_ns)
     # unless the job sets lat_percentiles=1, which adds them to total latency
     # (lat_ns = submission + completion). Use lat_ns when it has percentiles,

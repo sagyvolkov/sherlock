@@ -301,6 +301,23 @@ spec:
                     collectStats:
                       type: boolean
                       default: true
+                    statsDevicePattern:
+                      type: string
+                      description: >
+                        Regex selecting the block devices whose iostat counters go
+                        into the storage* result metrics. Default ^nvme\d+n\d+$:
+                        NVMe namespace heads, without multipath path devices
+                        (nvme0c0n1) that repeat the same I/O. Set it if the nodes'
+                        own disks are NVMe or the storage uses other devices.
+                    statsNetworkInterfaces:
+                      type: array
+                      items:
+                        type: string
+                      description: >
+                        Node interfaces that carry storage traffic (e.g. bond0.100).
+                        Their RX/TX bytes are totalled into the net* result metrics.
+                        Per-interface bytes for all interfaces are always kept in
+                        result.storageByNode.
                     compression:
                       type: string
                       enum: [gzip, zstd, none]
@@ -428,6 +445,7 @@ spec:
                           x-kubernetes-preserve-unknown-fields: true
                       result:
                         type: object
+                        x-kubernetes-preserve-unknown-fields: true
                         properties:
                           tps:
                             type: number

@@ -331,3 +331,16 @@ def test_bundles_accumulate_across_runs(cluster):
         _event(c, j)
     bundles = c.suite["status"]["artifacts"]["bundles"]
     assert [b["runName"] for b in bundles] == ["older", "smoke-r0"]
+
+
+def test_run_waits_for_stat_collectors(cluster):
+    c = cluster()
+    c.suite["status"]["runMatrix"][0]["statJobs"] = ["stats-worker-0"]
+    c.job_states["stats-worker-0"] = "Active"
+    for j in JOBS:
+        _event(c, j)
+    assert _run(c)["phase"] == "Running"        # benchmark done, stats still collecting
+    c.job_states["stats-worker-0"] = "Complete"
+    base.complete_run_if_done(plural=PLURAL, suite_name="smoke", namespace="sherlock",
+                              parse_results=parse_pgbench)
+    assert _run(c)["phase"] == "Completed"

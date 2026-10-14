@@ -26,9 +26,23 @@ logger = logging.getLogger(__name__)
 # Stats container — same image as sherlock v1 for now
 STATS_IMAGE = "quay.io/sagyvolkov/stats-container:sherlock0.7"
 
+# Service account for collector pods. hostNetwork needs an SCC that allows
+# it (hostnetwork-v2 on OpenShift); see rbac/operator-rbac.yaml.
+STATS_SERVICE_ACCOUNT = "sherlock-stats"
+
 # Default stat collection parameters
 DEFAULT_STATS_INTERVAL = 10   # seconds between collections
 DEFAULT_STATS_COUNT = 60      # number of intervals (interval × count = total duration)
+
+# Extra collection time beyond the benchmark runtime. Collectors start
+# before the benchmark pods, which can take a while to schedule and start;
+# metrics are totals, so idle time at either end does not skew them.
+STATS_MARGIN_SECS = 30
+
+
+def stats_count(runtime_secs: int, interval: int = DEFAULT_STATS_INTERVAL) -> int:
+    """Number of samples covering the benchmark runtime plus the margin."""
+    return -(-(int(runtime_secs) + STATS_MARGIN_SECS) // interval)
 
 
 def launch_stat_collectors(
@@ -113,12 +127,12 @@ def launch_stat_collectors(
                     "requests": {"cpu": "0.1", "memory": "64Mi"},
                     "limits":   {"cpu": "0.1", "memory": "64Mi"},
                 },
-                # hostNetwork was used in v1 for network interface stats.
-                # In v2 we default to False (standard k8s) and rely on
-                # /sys/class/net inside the container which is available
-                # without hostNetwork on most CNIs.
-                # Set to True via OCP Kustomize overlay if needed.
-                host_network=False,
+                # The node's network namespace: storage traffic (NVMe/TCP,
+                # iSCSI, Ceph) is sent by the host kernel on the node's NICs,
+                # which a pod network namespace cannot see. iostat reads
+                # /proc/diskstats, which is host-wide either way.
+                host_network=True,
+                service_account=STATS_SERVICE_ACCOUNT,
                 ttl_seconds=7200,  # keep job for 2h after completion for log collection
                 owner=owner,
             )
@@ -128,6 +142,25 @@ def launch_stat_collectors(
             logger.warning(f"Failed to launch stat collector on {node_name}: {e}")
 
     return jobs
+
+
+def wait_for_collectors_running(stat_jobs: dict[str, str], namespace: str,
+                                timeout: int = 120) -> None:
+    """
+    Wait until every collector pod is running, so the benchmark starts
+    inside the collection window and its first seconds are counted.
+    Gives up after timeout (the run still goes ahead, with a warning).
+    """
+    import time
+    pending = set(stat_jobs)
+    deadline = time.time() + timeout
+    while pending and time.time() < deadline:
+        pending = {j for j in pending
+                   if k8s.get_job_pod_phase(j, namespace) not in ("Running", "Succeeded")}
+        if pending:
+            time.sleep(2)
+    if pending:
+        logger.warning(f"Stat collectors not running after {timeout}s: {sorted(pending)}")
 
 
 def collect_stat_logs(

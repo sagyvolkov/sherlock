@@ -33,7 +33,8 @@ from src.utils.artifacts import (
 )
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
-    launch_stat_collectors,
+    launch_stat_collectors, stats_count, wait_for_collectors_running,
+    DEFAULT_STATS_INTERVAL,
 )
 from src.parsers.base import parse_storage_stats
 from src.parsers.aggregate import aggregate_results
@@ -317,20 +318,17 @@ def run_next_benchmark(
     # ── Launch stat collectors ────────────────────────────────────────────────
     stat_jobs = {}
     if spec.get("artifacts", {}).get("collectStats", True):
-        runtime_secs = _get_runtime_secs(params, spec)
-        stats_interval = 10
-        stats_count = (runtime_secs + 10) // stats_interval
-
         stat_jobs = launch_stat_collectors(
             suite_name=suite_name,
             run_name=run_name,
             namespace=namespace,
             worker_nodes=worker_nodes,
-            stats_interval=stats_interval,
-            stats_count=stats_count,
+            stats_interval=DEFAULT_STATS_INTERVAL,
+            stats_count=stats_count(_get_runtime_secs(params, spec)),
             owner=owner,
             name_key=run_key,
         )
+        wait_for_collectors_running(stat_jobs, namespace)
 
     # ── Launch benchmark jobs ─────────────────────────────────────────────────
     timeout_secs = k8s.parse_duration_secs(execution.get("timeoutPerRun"), 3600)
@@ -368,7 +366,7 @@ def run_next_benchmark(
     _update_run_phase(
         patch, run_matrix, run_name, "Running",
         extra={"benchmarkJobs": list(benchmark_jobs.keys()),
-               "statJobs": list(stat_jobs.keys())}
+               "statJobs": list(stat_jobs.keys()), "statNodes": stat_jobs}
     )
 
     logger.info(
@@ -526,6 +524,14 @@ def complete_run_if_done(
             _log_progress(suite_name, run["name"],
                           len(job_names) - len(active), len(job_names))
             return False
+        # Stat collectors print their data when their window ends, which is
+        # after the benchmark; wait for them (the suite timer re-checks)
+        stats_active = [j for j in run.get("statJobs") or []
+                        if k8s.get_job_state(j, namespace) == "Active"]
+        if stats_active:
+            logger.debug(f"[{suite_name}] Run {run['name']}: waiting for "
+                         f"{len(stats_active)} stat collectors")
+            return False
 
         try:
             k8s.patch_suite_status(
@@ -637,16 +643,23 @@ def handle_run_completion(
     )
 
     # Collect stat logs and parse storage metrics
+    artifacts_spec = spec.get("artifacts", {})
     stat_job_names = run.get("statJobs", [])
     stat_logs = {j: k8s.get_job_pod_logs(j, namespace) for j in stat_job_names}
     storage_results = {}
     if stat_logs:
-        storage_results = parse_storage_stats("\n".join(stat_logs.values()), "")
+        stat_nodes = run.get("statNodes") or {}
+        storage_results = parse_storage_stats(
+            {stat_nodes.get(j, j): log for j, log in stat_logs.items()},
+            runtime_secs=_get_runtime_secs(params, spec),
+            interval=DEFAULT_STATS_INTERVAL,
+            device_pattern=artifacts_spec.get("statsDevicePattern"),
+            network_interfaces=artifacts_spec.get("statsNetworkInterfaces"),
+        )
 
     result = {**bench_results, **storage_results}
 
     # ── Build and store artifact bundle ───────────────────────────────────────
-    artifacts_spec = spec.get("artifacts", {})
     try:
         bundle = build_bundle(
             run_name=run_name,

@@ -20,7 +20,9 @@ from src.parsers.benchmarks import (
     parse_pgbench, parse_sysbench, parse_hammerdb,
     parse_ycsb, parse_fio,
 )
-from src.parsers.base import parse_iostat, parse_vmstat, parse_storage_stats
+from src.parsers.base import (
+    parse_iostat_devices, parse_ifconfig_deltas, parse_vmstat, parse_storage_stats,
+)
 
 
 # ── pgbench ───────────────────────────────────────────────────────────────────
@@ -405,65 +407,108 @@ class TestParseFio:
         assert result["readIops"] == pytest.approx(8738.23, abs=0.1)
 
 
-# ── iostat parser ─────────────────────────────────────────────────────────────
+# ── stats collector parser ────────────────────────────────────────────────────
 
-IOSTAT_OUTPUT = """
-Linux 5.14.0 (worker-node-1)   01/15/2024      _x86_64_        (32 CPU)
+_HDR = ("Device            r/s     rMB/s   rrqm/s  %rrqm r_await rareq-sz     w/s     wMB/s"
+        "   wrqm/s  %wrqm w_await wareq-sz     d/s     dMB/s   drqm/s  %drqm d_await dareq-sz"
+        "     f/s f_await  aqu-sz  %util")
 
-avg-cpu:  %user   %nice %system %iowait  %steal   %idle
-           5.23    0.00    2.11    8.45    0.00   84.21
 
-Device            r/s     w/s   rkB/s   wkB/s  rrqm/s  wrqm/s  %rrqm  %wrqm r_await w_await aqu-sz rareq-sz wareq-sz  %util
-nvme0n1       1200.00  300.00 48000.00 12000.00    0.00    1.00   0.00   0.33    0.45    1.20   0.72    40.00    40.00  45.00
-nvme1n1        980.00  250.00 39200.00 10000.00    0.00    0.50   0.00   0.20    0.52    1.35   0.65    40.00    40.00  38.00
+def _dev(name, r_s, r_mb, r_await, w_s, w_mb, w_await, util):
+    return (f"{name} {r_s} {r_mb} 0.00 0.00 {r_await} 4.00 {w_s} {w_mb} 0.00 0.00 {w_await}"
+            f" 4.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 0.00 1.00 {util}")
 
-avg-cpu:  %user   %nice %system %iowait  %steal   %idle
-           6.10    0.00    2.45    9.12    0.00   82.33
 
-Device            r/s     w/s   rkB/s   wkB/s  rrqm/s  wrqm/s  %rrqm  %wrqm r_await w_await aqu-sz rareq-sz wareq-sz  %util
-nvme0n1       1250.00  320.00 50000.00 12800.00    0.00    1.20   0.00   0.37    0.48    1.15   0.78    40.00    40.00  47.00
-nvme1n1       1010.00  270.00 40400.00 10800.00    0.00    0.60   0.00   0.22    0.50    1.28   0.68    40.00    40.00  40.00
-"""
+def _ifconfig(prefix, rx, tx):
+    return "\n".join(f"{prefix}{l}" for l in [
+        "bond0.100: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 9000",
+        "        inet 10.205.0.111  netmask 255.255.255.0  broadcast 10.205.0.255",
+        f"        RX packets 100  bytes {rx} (1.0 GB)",
+        "        RX errors 0  dropped 0  overruns 0  frame 0",
+        f"        TX packets 200  bytes {tx} (2.0 GB)",
+        "",
+        "lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536",
+        "        RX packets 5  bytes 1000 (1.0 KB)",
+        "        TX packets 5  bytes 1000 (1.0 KB)",
+    ])
 
-class TestParseIostat:
 
-    def test_read_iops_averaged(self):
-        result = parse_iostat(IOSTAT_OUTPUT)
-        assert "avgReadIops" in result
-        # Two devices × two intervals: (1200+980+1250+1010) / 4 = 1110
-        assert result["avgReadIops"] == pytest.approx(1110.0, abs=1.0)
+# Two 10s samples as the stats container prints them (iostat -dtxmyz):
+# nvme0n1 is a multipath head, nvme0c0n1 its path (same I/O), sda the root disk
+STATS_LOG = "\n".join(f"IOSTAT-{l}" for l in [
+    "Linux 5.14.0-570 (worker1.lbits) \t10/14/26 \t_x86_64_\t(48 CPU)", "",
+    "10/14/26 18:56:13", _HDR,
+    _dev("nvme0c0n1", "1000.00", "4.00", "0.50", "500.00", "2.00", "1.00", "60.00"),
+    _dev("nvme0n1",   "1000.00", "4.00", "0.50", "500.00", "2.00", "1.00", "60.00"),
+    _dev("sda",       "0.00", "0.00", "0.00", "30.00", "0.10", "0.10", "0.10"), "",
+    "10/14/26 18:56:23", _HDR,
+    _dev("nvme0c0n1", "3000.00", "12.00", "0.70", "0.00", "0.00", "0.00", "80.00"),
+    _dev("nvme0n1",   "3000.00", "12.00", "0.70", "0.00", "0.00", "0.00", "80.00"),
+]) + "\n" + "\n".join(f"VMSTAT-{l}" for l in [
+    " r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st",
+    " 2  0      0 1234567  12345 678901    0    0     0  1234 5678 9012 15  5 75  4  0",
+    " 3  1      0 1234100  12500 679000    0    0     0  2345 6789  100 18  6 68  8  0",
+]) + "\nDATE.BEFORE-1791990000\n" + _ifconfig("IFCONFIG.BEFORE-", 1_000_000, 2_000_000) \
+   + "\nDATE.AFTER-1791990030\n" + _ifconfig("IFCONFIG.AFTER-", 11_485_760, 106_857_600)
 
-    def test_write_iops_averaged(self):
-        result = parse_iostat(IOSTAT_OUTPUT)
-        # (300+250+320+270) / 4 = 285
-        assert result["avgWriteIops"] == pytest.approx(285.0, abs=1.0)
 
-    def test_read_bandwidth_in_mbs(self):
-        result = parse_iostat(IOSTAT_OUTPUT)
-        # (48000+39200+50000+40400) / 4 kB/s / 1024 = ~43.16 MB/s
-        assert result["avgReadBwMBs"] == pytest.approx(43.16, abs=0.5)
+class TestParseIostatDevices:
 
-    def test_loop_devices_excluded(self):
-        """loop0, loop1, etc. should be filtered out."""
-        output_with_loop = IOSTAT_OUTPUT + """
-Device            r/s     w/s   rkB/s   wkB/s  rrqm/s  wrqm/s  %rrqm  %wrqm r_await w_await aqu-sz rareq-sz wareq-sz  %util
-loop0            0.10    0.00     1.20     0.00    0.00    0.00   0.00   0.00    5.00    0.00   0.00     1.00     0.00   0.00
-"""
-        result_with    = parse_iostat(output_with_loop)
-        result_without = parse_iostat(IOSTAT_OUTPUT)
-        # loop0 with tiny IOPS should not change the average significantly
-        # (it's excluded so averages should be identical)
-        assert result_with["avgReadIops"] == result_without["avgReadIops"]
+    def test_totals_are_rate_times_sample_length(self):
+        devs = parse_iostat_devices(STATS_LOG)
+        nvme = devs["nvme0n1"]
+        # 4 MB/s * 10s + 12 MB/s * 10s; 1000/s * 10s + 3000/s * 10s
+        assert nvme["readMiB"] == pytest.approx(160.0)
+        assert nvme["readIos"] == pytest.approx(40000)
+        assert nvme["writeMiB"] == pytest.approx(20.0)
+        assert nvme["writeIos"] == pytest.approx(5000)
+        # I/O-weighted: (0.5*10000 + 0.7*30000) / 40000
+        assert nvme["readAwaitMs"] == pytest.approx(0.65)
+        assert nvme["maxUtilPct"] == 80.0
 
-    def test_device_filter(self):
-        """device_filter restricts to devices matching the substring."""
-        result = parse_iostat(IOSTAT_OUTPUT, device_filter="nvme0")
-        # Only nvme0n1: (1200+1250) / 2 = 1225
-        assert result["avgReadIops"] == pytest.approx(1225.0, abs=1.0)
+    def test_columns_found_by_header_in_old_kb_layout(self):
+        old = ("Device r/s w/s rkB/s wkB/s rrqm/s wrqm/s %rrqm %wrqm r_await w_await "
+               "aqu-sz rareq-sz wareq-sz %util\n"
+               "nvme0n1 100.00 50.00 2048.00 1024.00 0 0 0 0 0.40 0.90 0.1 20 20 30.00\n")
+        nvme = parse_iostat_devices(old, interval=10)["nvme0n1"]
+        assert nvme["readMiB"] == pytest.approx(20.0)     # 2 MB/s * 10s
+        assert nvme["writeIos"] == pytest.approx(500)
 
-    def test_empty_output_returns_empty_dict(self):
-        result = parse_iostat("")
-        assert result == {}
+    def test_empty(self):
+        assert parse_iostat_devices("") == {}
+
+
+class TestParseStorageStats:
+
+    def test_counts_multipath_heads_only_and_rates_over_runtime(self):
+        r = parse_storage_stats({"worker1": STATS_LOG}, runtime_secs=20,
+                                network_interfaces=["bond0.100"])
+        # nvme0c0n1 (path) and sda (root disk) excluded by the default pattern
+        assert r["storageReadMiB"] == pytest.approx(160.0)
+        assert r["storageWriteMiB"] == pytest.approx(20.0)
+        assert r["storageReadMiBs"] == pytest.approx(8.0)
+        assert r["storageReadIops"] == pytest.approx(2000.0)
+        assert set(r["storageByNode"]["worker1"]["devices"]) == {"nvme0n1"}
+        # ifconfig deltas: 10 MiB received, 100 MiB sent
+        assert r["netRxMiB"] == pytest.approx(10.0)
+        assert r["netTxMiB"] == pytest.approx(100.0)
+        assert r["storageByNode"]["worker1"]["network"]["lo"] == {"rxBytes": 0, "txBytes": 0}
+        assert r["avgIoWaitPct"] == pytest.approx(6.0)
+
+    def test_nodes_are_summed(self):
+        r = parse_storage_stats({"w1": STATS_LOG, "w2": STATS_LOG}, runtime_secs=20)
+        assert r["storageReadMiB"] == pytest.approx(320.0)
+        assert "netRxMiB" not in r      # no interfaces selected
+
+    def test_device_pattern_override(self):
+        r = parse_storage_stats({"w1": STATS_LOG}, runtime_secs=20, device_pattern=r"^sda$")
+        assert r["storageWriteMiB"] == pytest.approx(1.0)
+        assert r["storageReadMiB"] == 0
+
+
+def test_ifconfig_deltas():
+    d = parse_ifconfig_deltas(STATS_LOG)
+    assert d["bond0.100"] == {"rxBytes": 10_485_760, "txBytes": 104_857_600}
 
 
 # ── vmstat parser ─────────────────────────────────────────────────────────────

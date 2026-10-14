@@ -28,6 +28,7 @@ _SUM_KEYS = {
     "tps", "qps", "nopm", "tpm", "throughputOpsPerSec",
     "readIops", "writeIops", "totalIops",
     "readBwMBs", "writeBwMBs", "totalBwMBs",
+    "readMiB", "writeMiB", "readIos", "writeIos",
 }
 
 # Used, in this order, as each instance's weight for averaged latencies

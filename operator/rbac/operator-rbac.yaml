@@ -103,6 +103,31 @@ rules:
     verbs: [get, list, watch, create, update, patch, delete]
 
 ---
+# ServiceAccount for stat collector pods. They run with hostNetwork so that
+# ifconfig sees the node's NICs (storage traffic is sent by the host kernel);
+# on OpenShift that needs the hostnetwork-v2 SCC.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sherlock-stats
+  namespace: sherlock
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sherlock-stats-hostnetwork
+  namespace: sherlock
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:hostnetwork-v2
+subjects:
+  - kind: ServiceAccount
+    name: sherlock-stats
+    namespace: sherlock
+
+---
 # Bind ClusterRole to the operator ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

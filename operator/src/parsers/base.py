@@ -21,124 +21,148 @@ logger = logging.getLogger(__name__)
 
 
 # ── iostat parser ─────────────────────────────────────────────────────────────
+#
+# The stats container prefixes every line with its source (IOSTAT-, VMSTAT-,
+# IFCONFIG.BEFORE-, ...) and runs `iostat -dtxmyz <interval> <count>`:
+# timestamped samples, extended columns in MB, idle devices omitted. Column
+# order differs between sysstat versions, so columns are located by header
+# name. Totals are each sample's rate times the sample length, so they do
+# not depend on how much of the collection window was idle.
 
-def parse_iostat(raw: str, device_filter: Optional[str] = None) -> dict:
+# NVMe namespace heads (nvme0n1). Excludes multipath path devices
+# (nvme0c0n1), which repeat the head's I/O, and partitions.
+DEFAULT_DEVICE_PATTERN = r"^nvme\d+n\d+$"
+
+_TIMESTAMP_RE = re.compile(
+    r"^(\d{2}/\d{2}/\d{2,4})\s+(\d{1,2}:\d{2}:\d{2})(?:\s*([AP]M))?\s*$")
+
+
+def _strip_prefix(raw: str, prefix: str) -> list[str]:
+    """Lines of one source, prefix removed; unprefixed text is kept as is."""
+    if prefix not in raw:
+        return raw.splitlines()
+    return [l[len(prefix):] for l in raw.splitlines() if l.startswith(prefix)]
+
+
+def _parse_timestamp(date: str, clock: str, ampm: Optional[str]) -> Optional[float]:
+    from datetime import datetime
+    fmt = "%m/%d/%y" if len(date) == 8 else "%m/%d/%Y"
+    try:
+        if ampm:
+            return datetime.strptime(f"{date} {clock} {ampm}", f"{fmt} %I:%M:%S %p").timestamp()
+        return datetime.strptime(f"{date} {clock}", f"{fmt} %H:%M:%S").timestamp()
+    except ValueError:
+        return None
+
+
+def parse_iostat_devices(raw: str, interval: float = 10.0) -> dict:
     """
-    Parse iostat -x output into per-device metrics, then average across
-    all intervals. Returns a dict of aggregated storage metrics.
-
-    iostat -x produces repeated blocks like:
-      Device  r/s   w/s  rkB/s  wkB/s  r_await  w_await  %util
-      nvme0n1 1200  300  48000  12000  0.5      1.2      45.0
-
-    device_filter: if set, only include devices matching this substring
-      (e.g. "nvme" to skip loop devices and sda).
-
-    Replaces:
-      grep ${device} ${file} | awk '{print $2","$8","$23}'
-      and the averaging loop in calculate_local_device_utilization()
+    Per-device totals over all iostat samples:
+      {device: {readMiB, writeMiB, readIos, writeIos, readAwaitMs,
+                writeAwaitMs, maxUtilPct, samples}}
+    readAwaitMs / writeAwaitMs are averages weighted by I/O count.
+    interval is the sample length when it cannot be read from timestamps.
     """
-    # Matches iostat -x extended output lines:
-    # Device r/s w/s rkB/s wkB/s rrqm/s wrqm/s %rrqm %wrqm r_await w_await aqu-sz rareq-sz wareq-sz svctm %util
-    IOSTAT_PATTERN = re.compile(
-        r'^(?P<device>\S+)\s+'
-        r'(?P<r_s>[\d.]+)\s+'    # r/s
-        r'(?P<w_s>[\d.]+)\s+'    # w/s
-        r'(?P<rkb_s>[\d.]+)\s+'  # rkB/s
-        r'(?P<wkb_s>[\d.]+)\s+'  # wkB/s
-        r'[\d.]+\s+[\d.]+\s+'    # rrqm/s wrqm/s
-        r'[\d.]+\s+[\d.]+\s+'    # %rrqm %wrqm
-        r'(?P<r_await>[\d.]+)\s+'  # r_await (ms)
-        r'(?P<w_await>[\d.]+)\s+'  # w_await (ms)
-        r'[\d.]+\s+'               # aqu-sz
-        r'[\d.]+\s+[\d.]+\s+'     # rareq-sz wareq-sz
-        r'(?:[\d.]+\s+)?'          # svctm (optional, removed in newer kernels)
-        r'(?P<util>[\d.]+)',        # %util
-        re.MULTILINE
-    )
+    devices: dict = {}
+    columns: Optional[dict] = None
+    sample_secs = float(interval)
+    prev_ts: Optional[float] = None
 
-    device_stats: dict[str, list] = {}
-
-    for match in IOSTAT_PATTERN.finditer(raw):
-        device = match.group("device")
-        if device_filter and device_filter not in device:
+    for line in _strip_prefix(raw, "IOSTAT-"):
+        ts = _TIMESTAMP_RE.match(line.strip())
+        if ts:
+            now = _parse_timestamp(*ts.groups())
+            if now is not None and prev_ts is not None and now > prev_ts:
+                sample_secs = now - prev_ts
+            prev_ts = now
             continue
-        # Skip loop devices, dm- devices (device mapper), and common non-data devices
-        if device.startswith(("loop", "dm-", "sr")):
+        fields = line.split()
+        if not fields:
             continue
+        if fields[0].rstrip(":") == "Device":
+            columns = {name: i for i, name in enumerate(fields)}
+            continue
+        if columns is None or len(fields) != len(columns):
+            continue
+        try:
+            stat = _iostat_sample(fields, columns)
+        except (KeyError, ValueError):
+            continue
+        d = devices.setdefault(fields[0], {
+            "readMiB": 0.0, "writeMiB": 0.0, "readIos": 0.0, "writeIos": 0.0,
+            "_rAwaitSum": 0.0, "_wAwaitSum": 0.0, "maxUtilPct": 0.0, "samples": 0,
+        })
+        d["readMiB"]    += stat["r_mb_s"] * sample_secs
+        d["writeMiB"]   += stat["w_mb_s"] * sample_secs
+        d["readIos"]    += stat["r_s"] * sample_secs
+        d["writeIos"]   += stat["w_s"] * sample_secs
+        d["_rAwaitSum"] += stat["r_await"] * stat["r_s"] * sample_secs
+        d["_wAwaitSum"] += stat["w_await"] * stat["w_s"] * sample_secs
+        d["maxUtilPct"]  = max(d["maxUtilPct"], stat["util"])
+        d["samples"]    += 1
 
-        stat = {
-            "r_iops":   float(match.group("r_s")),
-            "w_iops":   float(match.group("w_s")),
-            "r_bw_kbs": float(match.group("rkb_s")),
-            "w_bw_kbs": float(match.group("wkb_s")),
-            "r_await":  float(match.group("r_await")),
-            "w_await":  float(match.group("w_await")),
-            "util":     float(match.group("util")),
-        }
-        device_stats.setdefault(device, []).append(stat)
+    for d in devices.values():
+        r_await, w_await = d.pop("_rAwaitSum"), d.pop("_wAwaitSum")
+        d["readAwaitMs"]  = round(r_await / d["readIos"], 3) if d["readIos"] else 0.0
+        d["writeAwaitMs"] = round(w_await / d["writeIos"], 3) if d["writeIos"] else 0.0
+        for k in ("readMiB", "writeMiB", "readIos", "writeIos"):
+            d[k] = round(d[k], 2)
+    return devices
 
-    if not device_stats:
-        logger.warning("No iostat device data found in output")
-        return {}
 
-    # Aggregate: sum across devices, average across intervals
-    totals: dict[str, float] = {
-        "r_iops": 0, "w_iops": 0,
-        "r_bw_kbs": 0, "w_bw_kbs": 0,
-        "r_await": 0, "w_await": 0,
-        "util": 0,
-    }
-    n_intervals = 0
+def _iostat_sample(fields: list[str], columns: dict) -> dict:
+    """One device line → rates, in MB/s whichever unit iostat printed."""
+    def col(*names):
+        for n in names:
+            if n in columns:
+                return float(fields[columns[n]])
+        raise KeyError(names)
 
-    for device, intervals in device_stats.items():
-        n_intervals = max(n_intervals, len(intervals))
-        for interval in intervals:
-            for key in totals:
-                totals[key] += interval[key]
-
-    if n_intervals == 0:
-        return {}
-
-    # Average over all devices × intervals
-    n = n_intervals * len(device_stats)
+    if "rMB/s" in columns:
+        r_mb, w_mb = col("rMB/s"), col("wMB/s")
+    else:
+        r_mb, w_mb = col("rkB/s") / 1024, col("wkB/s") / 1024
     return {
-        "avgReadIops":    round(totals["r_iops"]   / n, 2),
-        "avgWriteIops":   round(totals["w_iops"]   / n, 2),
-        "avgReadBwMBs":   round(totals["r_bw_kbs"] / n / 1024, 2),  # kB/s → MB/s
-        "avgWriteBwMBs":  round(totals["w_bw_kbs"] / n / 1024, 2),
-        "avgLatencyMs":   round(
-            (totals["r_await"] + totals["w_await"]) / (2 * n), 2
-        ),
-        "avgUtilPct":     round(totals["util"] / n, 2),
-        # p95/p99 require per-interval data sorted — we'll compute these
-        # properly when the Prometheus integration lands. For now, approximate
-        # as the max observed value across intervals.
-        "p95LatencyMs":   _approx_percentile(device_stats, "r_await", 0.95),
-        "p99LatencyMs":   _approx_percentile(device_stats, "r_await", 0.99),
+        "r_s": col("r/s"), "w_s": col("w/s"),
+        "r_mb_s": r_mb, "w_mb_s": w_mb,
+        "r_await": col("r_await"), "w_await": col("w_await"),
+        "util": col("%util"),
     }
 
 
-def _approx_percentile(
-    device_stats: dict,
-    field: str,
-    pct: float,
-) -> float:
+# ── ifconfig parser ───────────────────────────────────────────────────────────
+
+_IFACE_RE = re.compile(r"^(\S+?):\s+flags=")
+_IFBYTES_RE = re.compile(r"(RX|TX) packets \d+\s+bytes (\d+)")
+
+
+def parse_ifconfig_deltas(raw: str) -> dict:
     """
-    Approximate a latency percentile from per-interval samples.
-    Not statistically rigorous but better than nothing for the Phase 1 parser.
-    Phase 2 will get proper percentiles from Prometheus histograms.
+    Bytes each interface received and sent between the collector's
+    IFCONFIG.BEFORE- and IFCONFIG.AFTER- snapshots:
+      {interface: {"rxBytes": int, "txBytes": int}}
     """
-    all_values = []
-    for intervals in device_stats.values():
-        for interval in intervals:
-            if field in interval:
-                all_values.append(interval[field])
-    if not all_values:
-        return 0.0
-    all_values.sort()
-    idx = int(len(all_values) * pct)
-    return round(all_values[min(idx, len(all_values) - 1)], 2)
+    def snapshot(prefix):
+        counters, iface = {}, None
+        for line in _strip_prefix(raw, prefix) if prefix in raw else []:
+            m = _IFACE_RE.match(line)
+            if m:
+                iface = m.group(1)
+                continue
+            m = _IFBYTES_RE.search(line)
+            if m and iface:
+                counters.setdefault(iface, {})[m.group(1)] = int(m.group(2))
+        return counters
+
+    before, after = snapshot("IFCONFIG.BEFORE-"), snapshot("IFCONFIG.AFTER-")
+    deltas = {}
+    for iface, end in after.items():
+        start = before.get(iface)
+        if not start or "RX" not in end or "TX" not in end:
+            continue
+        deltas[iface] = {"rxBytes": max(0, end["RX"] - start.get("RX", 0)),
+                         "txBytes": max(0, end["TX"] - start.get("TX", 0))}
+    return deltas
 
 
 # ── vmstat parser ─────────────────────────────────────────────────────────────
@@ -165,9 +189,10 @@ def parse_vmstat(raw: str) -> dict:
         re.MULTILINE
     )
 
+    text = "\n".join(_strip_prefix(raw, "VMSTAT-"))
     wa_values = [
         float(m.group("wa"))
-        for m in VMSTAT_PATTERN.finditer(raw)
+        for m in VMSTAT_PATTERN.finditer(text)
     ]
 
     if not wa_values:
@@ -181,17 +206,89 @@ def parse_vmstat(raw: str) -> dict:
 
 # ── Combined storage stats ────────────────────────────────────────────────────
 
-def parse_storage_stats(iostat_output: str, vmstat_output: str) -> dict:
+def parse_storage_stats(
+    node_logs: dict[str, str],
+    runtime_secs: float,
+    interval: float = 10.0,
+    device_pattern: Optional[str] = None,
+    network_interfaces: Optional[list[str]] = None,
+) -> dict:
     """
-    Parse both iostat and vmstat outputs and merge into a single storage
-    metrics dict matching the CRD status.runMatrix[].result schema.
+    Storage and network metrics for a run from each node's collector log.
 
-    Called by all benchmark-specific parsers to populate the shared
-    storage metrics fields.
+    node_logs: {node name: stats collector log}
+    runtime_secs: the benchmark's measured duration; rates are the totals
+      divided by it (the collection window is longer and partly idle, so
+      dividing by the window would understate them).
+    device_pattern: regex for the block devices to count
+      (default: NVMe namespace heads, DEFAULT_DEVICE_PATTERN).
+    network_interfaces: interfaces to total for net* metrics; per-interface
+      bytes for every interface are in storageByNode either way.
+
+    Result keys (cluster-wide sums over the selected devices / interfaces):
+      storageReadMiB, storageWriteMiB, storageReadIos, storageWriteIos,
+      storageReadMiBs, storageWriteMiBs, storageReadIops, storageWriteIops,
+      storageReadAwaitMs, storageWriteAwaitMs (I/O-weighted),
+      netRxMiB, netTxMiB, netRxMiBs, netTxMiBs,
+      avgIoWaitPct, maxIoWaitPct, storageByNode (per node detail).
     """
-    iostat_metrics = parse_iostat(iostat_output)
-    vmstat_metrics = parse_vmstat(vmstat_output)
-    return {**iostat_metrics, **vmstat_metrics}
+    pattern = re.compile(device_pattern or DEFAULT_DEVICE_PATTERN)
+    wanted_ifaces = set(network_interfaces or [])
+    totals = {"readMiB": 0.0, "writeMiB": 0.0, "readIos": 0.0, "writeIos": 0.0,
+              "rAwait": 0.0, "wAwait": 0.0, "rx": 0, "tx": 0}
+    by_node, iowait = {}, []
+
+    for node, raw in node_logs.items():
+        devices = {d: v for d, v in parse_iostat_devices(raw, interval).items()
+                   if pattern.search(d)}
+        net = parse_ifconfig_deltas(raw)
+        by_node[node] = {"devices": devices, "network": net}
+        for v in devices.values():
+            totals["readMiB"]  += v["readMiB"]
+            totals["writeMiB"] += v["writeMiB"]
+            totals["readIos"]  += v["readIos"]
+            totals["writeIos"] += v["writeIos"]
+            totals["rAwait"]   += v["readAwaitMs"] * v["readIos"]
+            totals["wAwait"]   += v["writeAwaitMs"] * v["writeIos"]
+        for iface in wanted_ifaces & set(net):
+            totals["rx"] += net[iface]["rxBytes"]
+            totals["tx"] += net[iface]["txBytes"]
+        vm = parse_vmstat(raw)
+        if vm:
+            iowait.append(vm)
+
+    if not any(n["devices"] or n["network"] for n in by_node.values()):
+        logger.warning("No iostat or ifconfig data found in stats output")
+        return {}
+
+    secs = max(float(runtime_secs), 1.0)
+    mib = 1024 * 1024
+    result = {
+        "storageReadMiB":   round(totals["readMiB"], 2),
+        "storageWriteMiB":  round(totals["writeMiB"], 2),
+        "storageReadIos":   round(totals["readIos"]),
+        "storageWriteIos":  round(totals["writeIos"]),
+        "storageReadMiBs":  round(totals["readMiB"] / secs, 2),
+        "storageWriteMiBs": round(totals["writeMiB"] / secs, 2),
+        "storageReadIops":  round(totals["readIos"] / secs, 2),
+        "storageWriteIops": round(totals["writeIos"] / secs, 2),
+        "storageReadAwaitMs":  round(totals["rAwait"] / totals["readIos"], 3)
+                               if totals["readIos"] else 0.0,
+        "storageWriteAwaitMs": round(totals["wAwait"] / totals["writeIos"], 3)
+                               if totals["writeIos"] else 0.0,
+        "storageByNode": by_node,
+    }
+    if wanted_ifaces:
+        result.update({
+            "netRxMiB":  round(totals["rx"] / mib, 2),
+            "netTxMiB":  round(totals["tx"] / mib, 2),
+            "netRxMiBs": round(totals["rx"] / mib / secs, 2),
+            "netTxMiBs": round(totals["tx"] / mib / secs, 2),
+        })
+    if iowait:
+        result["avgIoWaitPct"] = round(sum(v["avgIoWaitPct"] for v in iowait) / len(iowait), 2)
+        result["maxIoWaitPct"] = max(v["maxIoWaitPct"] for v in iowait)
+    return result
 
 
 # ── SUMMARY line parser (v1 compatibility) ────────────────────────────────────
