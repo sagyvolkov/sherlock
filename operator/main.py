@@ -39,5 +39,16 @@ logging.getLogger('kubernetes').setLevel(logging.WARNING)
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
+
+class _DropTimerSuccess(logging.Filter):
+    """kopf logs "Timer 'x' succeeded." at INFO on every tick (every 10s per
+    active suite); drop those lines and keep everything else."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (msg.startswith("Timer ") and msg.endswith(" succeeded."))
+
+
+logging.getLogger('kopf.objects').addFilter(_DropTimerSuccess())
+
 if __name__ == '__main__':
     kopf.run(clusterwide=True)

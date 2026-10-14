@@ -11,9 +11,10 @@ import kopf
 
 from src.handlers.base import (
     initialize_suite, deploy_db_infrastructure,
-    run_next_benchmark, handle_run_completion,
+    run_next_benchmark,
     _update_run_phase, _now,
     BENCHMARK_IMAGE,
+    on_benchmark_job_event, on_suite_timer,
 )
 from src.parsers.benchmarks import parse_fio
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 GROUP   = "sherlock.io"
 VERSION = "v1alpha1"
 KIND = "SherlockFioSuite"
+PLURAL = "sherlockfiosuites"
 
 FIO_IMAGE = "quay.io/sagyvolkov/fio_container:0.6"
 
@@ -72,7 +74,7 @@ def on_create(name, namespace, spec, patch, **kwargs):
 
 
 @kopf.on.field(GROUP, VERSION, KIND, field='status.phase')
-def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
+def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwargs):
     if new != "Ready":
         return
 
@@ -88,6 +90,8 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
 
     run_name     = next_run["name"]
     params       = next_run["params"]
+    # Unique per suite instance, run and retry attempt (see base.run_next_benchmark)
+    run_key      = f"{body['metadata']['uid']}/{run_name}/{next_run.get('retryCount', 0)}"
     worker_nodes = status.get("workerNodes", [])
     pvc_names    = status.get("pvcNames", [])
     storage      = spec["storage"]
@@ -111,14 +115,21 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
             suite_name=name, run_name=run_name, namespace=namespace,
             worker_nodes=worker_nodes,
             stats_count=(runtime + 10) // 10,
+            owner=body,
+            name_key=run_key,
         )
 
     # Launch one fio Job per PVC
+    timeout_secs = k8s.parse_duration_secs(
+        spec.get("execution", {}).get("timeoutPerRun"), 3600
+    )
     benchmark_jobs = []
     for j, pvc_name in enumerate(pvc_names):
         node_idx  = j % len(worker_nodes)
         node_name = worker_nodes[node_idx]
-        job_name  = f"{name}-fio-{run_name}-{j}"[:63]
+        # Was f"{name}-fio-{run_name}-{j}"[:63], which cut off the PVC index
+        # for long run names so every PVC's Job got the same name
+        job_name  = k8s.job_name(f"{name}-fio-{j}", f"{run_key}/fio/{j}")
         command   = _build_fio_command(params, volume_mode, pvc_name)
 
         pvc_mounts = (
@@ -138,6 +149,8 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
             },
             resources=storage.get("resources", {}),
             pvc_mounts=pvc_mounts,
+            owner=body,
+            active_deadline_seconds=timeout_secs,
         )
         benchmark_jobs.append(job_name)
 
@@ -152,29 +165,21 @@ def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
 
 
 @kopf.on.event('batch', 'v1', 'jobs', labels={f'{GROUP}/suite-kind': KIND})
-def on_job_event(name, namespace, spec, status, meta, **kwargs):
-    conditions = (status or {}).get("conditions", [])
-    suite_name = meta.get("labels", {}).get("sherlock.io/suite-name", "")
-    run_name   = meta.get("labels", {}).get("sherlock.io/run-name", "")
-    if meta.get("labels", {}).get("sherlock.io/role") != "benchmark":
-        return
-    complete = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions)
-    failed   = any(c.get("type") == "Failed"   and c.get("status") == "True" for c in conditions)
-    if not (complete or failed):
-        return
-    from src.utils import k8s
-    suite = k8s.get_custom_resource(GROUP, VERSION, "sherlockfiosuites", suite_name, namespace)
-    if not suite:
-        return
-    from src.handlers.base import _SuitePatch
-    suite_patch = _SuitePatch(plural="sherlockfiosuites")
-    handle_run_completion(
-        suite_name=suite_name, namespace=namespace,
-        spec=suite.get("spec", {}), status=suite.get("status", {}),
-        patch=suite_patch, run_name=run_name, job_name=name,
-        succeeded=complete, parse_results=parse_fio,
+def on_job_event(type, name, namespace, status, meta, **kwargs):
+    """A fio Job changed; finish its run if it was the last one."""
+    on_benchmark_job_event(
+        event_type=type, job_name=name, namespace=namespace,
+        job_meta=meta, job_status=status,
+        plural=PLURAL, parse_results=parse_fio,
     )
-    suite_patch.flush(suite_name, namespace)
+
+
+@kopf.timer(GROUP, VERSION, KIND, interval=10.0,
+            when=lambda status, **_: (status or {}).get("phase") in ("Running", "Sleeping"))
+def on_timer(name, namespace, status, patch, **kwargs):
+    """Wake up after sleepBetweenRuns; back-stop for missed Job events."""
+    on_suite_timer(name, namespace, status, patch,
+                   plural=PLURAL, parse_results=parse_fio)
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)

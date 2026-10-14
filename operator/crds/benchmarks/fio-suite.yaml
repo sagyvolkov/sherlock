@@ -414,6 +414,12 @@ spec:
                     fio adds a 'Provisioning' phase (between Pending and Ready)
                     because PVC provisioning for block storage can take significant
                     time, especially with large storageSize values.
+                nextRunAt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    While phase is Sleeping, when the next run starts
+                    (completion time + execution.sleepBetweenRuns).
                 observedGeneration:
                   type: integer
                 runMatrix:
@@ -454,6 +460,15 @@ spec:
                         description: Names of the stat collector Jobs launched for this run.
                         items:
                           type: string
+                      instanceResults:
+                        type: array
+                        description: >-
+                          Parsed result of each benchmark Job (one per DB instance or
+                          PVC). result holds these combined: throughput summed, average
+                          latency weighted by throughput, percentiles from the slowest.
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
                       result:
                         type: object
                         description: >

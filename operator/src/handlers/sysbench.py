@@ -11,8 +11,9 @@ import kopf
 
 from src.handlers.base import (
     initialize_suite, deploy_db_infrastructure,
-    run_next_benchmark, handle_run_completion,
+    run_next_benchmark,
     BENCHMARK_IMAGE,
+    on_benchmark_job_event, on_suite_timer,
 )
 from src.parsers.benchmarks import parse_sysbench
 from src.utils.credentials import resolve as resolve_credentials
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 GROUP   = "sherlock.io"
 VERSION = "v1alpha1"
 KIND = "SherlockSysbenchSuite"
+PLURAL  = "sherlocksysbenchsuites"
 
 DEFAULT_CREDENTIALS = {
     "username": "sherlock",
@@ -42,41 +44,34 @@ def on_create(name, namespace, spec, patch, **kwargs):
 
 
 @kopf.on.field(GROUP, VERSION, KIND, field='status.phase')
-def on_phase_change(name, namespace, spec, status, patch, old, new, **kwargs):
+def on_phase_change(name, namespace, spec, status, patch, old, new, body, **kwargs):
     if new == "Ready":
         run_next_benchmark(
             suite_name=name, namespace=namespace, spec=spec, status=status,
             patch=patch, build_benchmark_command=_build_command,
             parse_results=parse_sysbench, benchmark_image=BENCHMARK_IMAGE,
             suite_kind=KIND,
+            owner=body,
         )
 
 
-@kopf.on.event('batch', 'v1', 'jobs', labels={f'{GROUP}/suite-kind': KIND})
-def on_job_event(name, namespace, spec, status, meta, **kwargs):
-    conditions = (status or {}).get("conditions", [])
-    suite_name = meta.get("labels", {}).get("sherlock.io/suite-name", "")
-    run_name   = meta.get("labels", {}).get("sherlock.io/run-name", "")
-    if meta.get("labels", {}).get("sherlock.io/role") != "benchmark":
-        return
-    complete = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions)
-    failed   = any(c.get("type") == "Failed"   and c.get("status") == "True" for c in conditions)
-    if not (complete or failed):
-        return
-    from src.utils import k8s
-    suite = k8s.get_custom_resource(GROUP, VERSION, "sherlocksysbenchsuites", suite_name, namespace)
-    if not suite:
-        return
-    from src.handlers.base import _SuitePatch
-    suite_patch = _SuitePatch(plural="sherlocksysbenchsuites")
-    handle_run_completion(
-        suite_name=suite_name, namespace=namespace,
-        spec=suite.get("spec", {}), status=suite.get("status", {}),
-        patch=suite_patch, run_name=run_name, job_name=name,
-        succeeded=complete, parse_results=parse_sysbench,
+@kopf.on.event('batch', 'v1', 'jobs',
+               labels={f'{GROUP}/suite-kind': KIND})
+def on_job_event(type, name, namespace, status, meta, **kwargs):
+    """A benchmark Job changed; finish its run if it was the last one."""
+    on_benchmark_job_event(
+        event_type=type, job_name=name, namespace=namespace,
+        job_meta=meta, job_status=status,
+        plural=PLURAL, parse_results=parse_sysbench,
     )
-    suite_patch.flush(suite_name, namespace)
 
+
+@kopf.timer(GROUP, VERSION, KIND, interval=10.0,
+            when=lambda status, **_: (status or {}).get("phase") in ("Running", "Sleeping"))
+def on_timer(name, namespace, status, patch, **kwargs):
+    """Wake up after sleepBetweenRuns; back-stop for missed Job events."""
+    on_suite_timer(name, namespace, status, patch,
+                   plural=PLURAL, parse_results=parse_sysbench)
 
 
 @kopf.on.delete(GROUP, VERSION, KIND)

@@ -18,21 +18,23 @@ This replaces the orchestration flow in:
   - print_results (Collecting phase)
 """
 
-import hashlib
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 import kopf
+from kubernetes.client.rest import ApiException
 
 from src.utils.matrix import expand, make_run_name, count_runs
 from src.utils import k8s
 from src.utils.artifacts import build_bundle, store_bundle, enforce_retention
 from src.db.deploy import deploy_databases, wait_for_databases_ready, teardown_databases
 from src.plugins.storage.generic import (
-    launch_stat_collectors, collect_stat_logs
+    launch_stat_collectors,
 )
 from src.parsers.base import parse_storage_stats
+from src.parsers.aggregate import aggregate_results
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,9 @@ LABEL_SUITE      = "sherlock.io/suite-name"
 LABEL_KIND       = "sherlock.io/suite-kind"
 LABEL_RUN        = "sherlock.io/run-name"
 LABEL_ROLE       = "sherlock.io/role"
+
+GROUP   = "sherlock.io"
+VERSION = "v1alpha1"
 
 # Benchmark container image (shared across all DB benchmarks in v1)
 # Individual handlers can override this.
@@ -73,7 +78,7 @@ class _SuitePatch:
         from src.utils import k8s as _k8s
         if self._status:
             _k8s.patch_suite_status(
-                "sherlock.io", "v1alpha1", self._plural,
+                GROUP, VERSION, self._plural,
                 suite_name, namespace, self._status,
             )
 
@@ -190,9 +195,10 @@ def run_next_benchmark(
     build_prepare_command: Optional[
         Callable[[dict, Optional[dict], str], Optional[list[str]]]
     ] = None,
+    owner: Optional[dict] = None,
 ):
     """
-    Phase: Ready/Sleeping → Running
+    Phase: Ready → Running
 
     Finds the next Pending run in the matrix and launches benchmark Jobs for it.
     Replaces the main loop in run_database_workload-parallel.
@@ -203,6 +209,10 @@ def run_next_benchmark(
       loads the benchmark data (the "prepare" job type in
       run_database_workload-parallel), or None if the data left by the
       previous run (prev_params, None for the first run) can be reused.
+    owner → the suite CR (kopf `body`). Every Job gets an ownerReference to
+      it, so Jobs are deleted with the suite and stale Jobs from an earlier
+      suite with the same name can be told apart. Its UID also goes into
+      the Job names, which keeps them unique and under 63 characters.
     """
     run_matrix = status.get("runMatrix", [])
     execution  = spec.get("execution", {})
@@ -217,6 +227,9 @@ def run_next_benchmark(
 
     run_name = next_run["name"]
     params   = next_run["params"]
+    suite_uid = ((owner or {}).get("metadata") or {}).get("uid", "")
+    # Unique per suite instance, run and retry attempt
+    run_key  = f"{suite_uid}/{run_name}/{next_run.get('retryCount', 0)}"
     patch.status["phase"] = "Running"
     patch.status["summary"] = {**status.get("summary", {}), "currentRunName": run_name}
 
@@ -243,6 +256,8 @@ def run_next_benchmark(
             build_prepare_command=build_prepare_command,
             benchmark_image=benchmark_image,
             suite_kind=suite_kind,
+            owner=owner,
+            run_key=run_key,
         )
         if not prepared:
             _update_run_phase(patch, run_matrix, run_name, "Failed",
@@ -264,16 +279,18 @@ def run_next_benchmark(
             worker_nodes=worker_nodes,
             stats_interval=stats_interval,
             stats_count=stats_count,
+            owner=owner,
+            name_key=run_key,
         )
 
     # ── Launch benchmark jobs ─────────────────────────────────────────────────
+    timeout_secs = k8s.parse_duration_secs(execution.get("timeoutPerRun"), 3600)
     benchmark_jobs = {}
     for dep in deployments:
         db_ip = dep.get("ip", "")
-        job_name = f"{dep['name']}-{run_name}"
-        # k8s name length limit
-        if len(job_name) > 63:
-            job_name = job_name[:63]
+        # Was f"{dep['name']}-{run_name}"[:63], which collided for runs that
+        # only differ in parameters past the cut-off
+        job_name = k8s.job_name(f"{dep['name']}-run", f"{run_key}/bench/{dep['name']}")
 
         command = build_benchmark_command(params, db_ip)
 
@@ -292,6 +309,9 @@ def run_next_benchmark(
             node_name=dep["node"],
             labels=labels,
             resources=spec.get("database", {}).get("resources", {}),
+            owner=owner,
+            # A hung benchmark is marked Failed instead of blocking the run
+            active_deadline_seconds=timeout_secs,
         )
         benchmark_jobs[job_name] = dep
 
@@ -308,88 +328,269 @@ def run_next_benchmark(
     )
 
 
+# ── Run completion ────────────────────────────────────────────────────────────
+#
+# A run has one benchmark Job per DB instance (or per PVC for fio). The run is
+# finished only when every one of them is terminal, and it must be finished
+# exactly once even though each Job produces its own event and the suite timer
+# also checks. complete_run_if_done() is the single entry point for both:
+#
+#   1. Re-read the suite and confirm the run is still the current one.
+#   2. Return early unless every benchmark Job is terminal.
+#   3. Claim the run by patching suite phase Running → Collecting with a
+#      resourceVersion precondition. Only one caller can win; the others get
+#      409, re-read, see Collecting, and stop.
+#   4. The winner parses all Job logs together and advances the suite.
+
+CLAIM_ATTEMPTS = 5
+
+
+def on_benchmark_job_event(
+    event_type: Optional[str],
+    job_name: str,
+    namespace: str,
+    job_meta: dict,
+    job_status: dict,
+    plural: str,
+    parse_results: Callable[[str, dict], dict],
+):
+    """
+    Shared body of every suite's kopf.on.event handler for benchmark Jobs.
+
+    Ignores deletions, non-benchmark Jobs, Jobs still running, and Jobs not
+    owned by the current suite (e.g. left over from a deleted suite with the
+    same name). Everything else is handed to complete_run_if_done().
+    """
+    if event_type == "DELETED":
+        return
+    labels = job_meta.get("labels") or {}
+    if labels.get(LABEL_ROLE) != "benchmark":
+        return
+    conditions = (job_status or {}).get("conditions") or []
+    if k8s.job_state_from_conditions(conditions) == "Active":
+        return
+
+    owner_uids = {o.get("uid") for o in job_meta.get("ownerReferences") or []}
+    if not owner_uids:
+        logger.debug(f"Ignoring Job {job_name}: no ownerReferences (pre-v2 Job)")
+        return
+
+    complete_run_if_done(
+        plural=plural,
+        suite_name=labels.get(LABEL_SUITE, ""),
+        namespace=namespace,
+        parse_results=parse_results,
+        run_name=labels.get(LABEL_RUN, ""),
+        job_name=job_name,
+        job_owner_uids=owner_uids,
+    )
+
+
+def on_suite_timer(
+    name: str,
+    namespace: str,
+    status: dict,
+    patch: kopf.Patch,
+    plural: str,
+    parse_results: Callable[[str, dict], dict],
+):
+    """
+    Shared body of every suite's kopf.timer handler.
+
+    Sleeping: once status.nextRunAt has passed, set phase Ready, which the
+      status.phase field handler turns into the next run. This replaces the
+      time.sleep() that used to block the Job event handler.
+    Running: check whether the current run has finished. Job events normally
+      get there first; this catches events missed while the operator was
+      restarting or before the run's Job list was written to status.
+    """
+    phase = (status or {}).get("phase")
+    if phase == "Sleeping":
+        next_run_at = status.get("nextRunAt")
+        if not next_run_at or _parse_time(next_run_at) <= _utcnow():
+            patch.status["phase"] = "Ready"
+            patch.status["nextRunAt"] = None
+    elif phase == "Running":
+        complete_run_if_done(
+            plural=plural,
+            suite_name=name,
+            namespace=namespace,
+            parse_results=parse_results,
+        )
+
+
+def complete_run_if_done(
+    plural: str,
+    suite_name: str,
+    namespace: str,
+    parse_results: Callable[[str, dict], dict],
+    run_name: Optional[str] = None,
+    job_name: Optional[str] = None,
+    job_owner_uids: Optional[set] = None,
+) -> bool:
+    """
+    Finish the suite's current run if all its benchmark Jobs are terminal.
+
+    run_name / job_name / job_owner_uids come from a Job event and restrict
+    the check to that Job's run; the timer passes none of them and checks
+    whichever run is Running. Returns True if this call finished the run.
+    """
+    for _ in range(CLAIM_ATTEMPTS):
+        suite = k8s.get_custom_resource(GROUP, VERSION, plural, suite_name, namespace)
+        if not suite:
+            return False
+        meta   = suite.get("metadata", {})
+        spec   = suite.get("spec", {})
+        status = suite.get("status") or {}
+
+        if job_owner_uids is not None and meta.get("uid") not in job_owner_uids:
+            logger.info(
+                f"[{suite_name}] Ignoring Job {job_name}: owned by a different "
+                f"suite instance (stale Job from a deleted suite)"
+            )
+            return False
+        if status.get("phase") != "Running":
+            return False
+
+        run_matrix = status.get("runMatrix", [])
+        run = next(
+            (r for r in run_matrix
+             if r.get("phase") == "Running"
+             and (run_name is None or r.get("name") == run_name)),
+            None,
+        )
+        if run is None:
+            return False
+        job_names = run.get("benchmarkJobs") or []
+        if not job_names:
+            return False  # Jobs not recorded yet; the timer will retry
+        if job_name is not None and job_name not in job_names:
+            logger.info(
+                f"[{suite_name}] Ignoring Job {job_name}: not one of "
+                f"run {run['name']}'s benchmark Jobs"
+            )
+            return False
+
+        states = {j: k8s.get_job_state(j, namespace) for j in job_names}
+        active = [j for j, s in states.items() if s == "Active"]
+        if active:
+            logger.info(
+                f"[{suite_name}] Run {run['name']}: "
+                f"{len(job_names) - len(active)}/{len(job_names)} benchmark Jobs done"
+            )
+            return False
+
+        try:
+            k8s.patch_suite_status(
+                GROUP, VERSION, plural, suite_name, namespace,
+                {"phase": "Collecting"},
+                resource_version=meta.get("resourceVersion"),
+            )
+        except ApiException as e:
+            if e.status == 409:
+                continue  # someone else changed the suite; re-read and recheck
+            raise
+
+        # This caller owns the run from here on.
+        patch = _SuitePatch(plural=plural)
+        try:
+            handle_run_completion(
+                suite_name=suite_name, namespace=namespace,
+                spec=spec, status=status, patch=patch,
+                run=run, job_states=states, parse_results=parse_results,
+            )
+        except Exception:
+            logger.exception(
+                f"[{suite_name}] Error while completing run {run['name']}"
+            )
+            patch = _SuitePatch(plural=plural)
+            _update_run_phase(patch, run_matrix, run["name"], "Failed",
+                              end_time=_now())
+            patch.status["phase"] = "Failed"
+        patch.flush(suite_name, namespace)
+        return True
+
+    logger.warning(
+        f"[{suite_name}] Could not claim run completion after "
+        f"{CLAIM_ATTEMPTS} attempts; the suite timer will retry"
+    )
+    return False
+
+
 def handle_run_completion(
     suite_name: str,
     namespace: str,
     spec: dict,
     status: dict,
-    patch: kopf.Patch,
-    run_name: str,
-    job_name: str,
-    succeeded: bool,
+    patch: "_SuitePatch",
+    run: dict,
+    job_states: dict[str, str],
     parse_results: Callable[[str, dict], dict],
 ):
     """
-    Called when a benchmark job completes (success or failure).
-    Collects logs, parses results, applies failure policy.
+    Called exactly once per run attempt, after every benchmark Job is terminal
+    and the run has been claimed (suite phase is Collecting).
+
+    Parses all Job logs, combines them into one result, stores the artifact
+    bundle, applies the failure policy, and moves the suite on.
 
     Replaces the log-collection and result-printing logic in
     run_database_workload-parallel.
     """
-    run_matrix   = status.get("runMatrix", [])
-    current_run  = next((r for r in run_matrix if r["name"] == run_name), None)
-    execution    = spec.get("execution", {})
-    failure_policy = execution.get("failurePolicy", "abortAll")
+    run_name   = run["name"]
+    params     = run.get("params", {})
+    run_matrix = status.get("runMatrix", [])
 
-    if not succeeded:
-        retry_count = (current_run or {}).get("retryCount", 0)
-        retry_limit = execution.get("retryLimit", 3)
+    benchmark_logs = {
+        j: (k8s.get_job_pod_logs(j, namespace) if state != "Missing" else "")
+        for j, state in job_states.items()
+    }
 
-        if failure_policy == "retryN" and retry_count < retry_limit:
-            logger.warning(
-                f"[{suite_name}] Run {run_name} failed "
-                f"(attempt {retry_count + 1}/{retry_limit}), retrying"
+    # A Job that failed, vanished, or "succeeded" without printing any metrics
+    # (run_pgbench exits 0 even when pgbench fails) all count as failures.
+    problems = {
+        j: f"Job {state}" for j, state in job_states.items() if state != "Complete"
+    }
+    instance_results = []
+    for j in job_states:
+        if j in problems:
+            continue
+        parsed = parse_results(benchmark_logs[j], params)
+        if not parsed:
+            problems[j] = "no benchmark metrics in output"
+            continue
+        instance_results.append({"job": j, **parsed})
+
+    if problems:
+        for j, reason in problems.items():
+            logger.error(
+                f"[{suite_name}] Run {run_name}: {j}: {reason}\n"
+                f"{benchmark_logs.get(j, '')[-2000:]}"
             )
-            _update_run_phase(
-                patch, run_matrix, run_name, "Pending",
-                extra={"retryCount": retry_count + 1}
-            )
-            return
-
-        logger.error(f"[{suite_name}] Run {run_name} failed")
-        _update_run_phase(patch, run_matrix, run_name, "Failed",
-                          end_time=_now())
-        _increment_summary(patch, status, failed=True)
-
-        if failure_policy == "abortAll":
-            patch.status["phase"] = "Failed"
-            logger.error(f"[{suite_name}] Aborting suite due to failed run")
-            return
-
-        # continueAndReport — mark suite Degraded at end, keep going
-        _start_next_or_finish(
-            suite_name, namespace, spec, status, patch, parse_results
-        )
+        _handle_run_failure(suite_name, spec, status, patch, run)
         return
 
-    # ── Success: collect logs and parse results ───────────────────────────────
-    benchmark_log = k8s.get_job_pod_logs(job_name, namespace)
-    params = (current_run or {}).get("params", {})
-    bench_results = parse_results(benchmark_log, params)
+    bench_results = aggregate_results(
+        [{k: v for k, v in r.items() if k != "job"} for r in instance_results]
+    )
 
     # Collect stat logs and parse storage metrics
-    stat_job_names = (current_run or {}).get("statJobs", [])
+    stat_job_names = run.get("statJobs", [])
+    stat_logs = {j: k8s.get_job_pod_logs(j, namespace) for j in stat_job_names}
     storage_results = {}
-    if stat_job_names:
-        stat_logs = collect_stat_logs(
-            {j: j for j in stat_job_names}, namespace
-        )
-        # Merge storage metrics across all nodes (average)
-        all_iostat = "\n".join(stat_logs.values())
-        storage_results = parse_storage_stats(all_iostat, "")
+    if stat_logs:
+        storage_results = parse_storage_stats("\n".join(stat_logs.values()), "")
 
     result = {**bench_results, **storage_results}
 
     # ── Build and store artifact bundle ───────────────────────────────────────
     artifacts_spec = spec.get("artifacts", {})
-    patch.status["phase"] = "Collecting"
     try:
         bundle = build_bundle(
             run_name=run_name,
-            benchmark_logs={job_name: benchmark_log},
-            stat_logs={j: k8s.get_job_pod_logs(j, namespace)
-                       for j in (current_run or {}).get("statJobs", [])},
-            parsed_result=result,
+            benchmark_logs=benchmark_logs,
+            stat_logs=stat_logs,
+            parsed_result={**result, "instances": instance_results},
             suite_spec=spec,
             params=params,
             compression=artifacts_spec.get("compression", "gzip"),
@@ -402,13 +603,11 @@ def handle_run_completion(
             artifacts_spec=artifacts_spec,
             patch=patch,
         )
-        # Enforce retention policy
         current_bundles = (
             patch.status.get("artifacts", {}).get("bundles", [])
             or status.get("artifacts", {}).get("bundles", [])
         )
         enforce_retention(suite_name, artifacts_spec, current_bundles)
-
     except Exception as e:
         logger.warning(f"[{suite_name}] Artifact collection failed for {run_name}: {e}")
         artifact_path = ""
@@ -416,23 +615,78 @@ def handle_run_completion(
     _update_run_phase(
         patch, run_matrix, run_name, "Completed",
         end_time=_now(),
-        extra={"result": result, "artifactPath": artifact_path}
+        extra={
+            "result": result,
+            "instanceResults": instance_results,
+            "artifactPath": artifact_path,
+        },
     )
     _increment_summary(patch, status, completed=True)
 
     logger.info(
-        f"[{suite_name}] Run {run_name} completed. "
+        f"[{suite_name}] Run {run_name} completed "
+        f"({len(instance_results)} instances). "
         f"Primary metric: {_primary_metric(result)}"
     )
+    _advance(suite_name, spec, status, patch)
 
-    # Sleep between runs if sequential
+
+def _handle_run_failure(suite_name, spec, status, patch, run):
+    """Apply execution.failurePolicy to a failed run."""
+    run_name   = run["name"]
+    run_matrix = status.get("runMatrix", [])
+    execution  = spec.get("execution", {})
+    failure_policy = execution.get("failurePolicy", "abortAll")
+    retry_count = run.get("retryCount", 0)
+    retry_limit = execution.get("retryLimit", 3)
+
+    if failure_policy == "retryN" and retry_count < retry_limit:
+        logger.warning(
+            f"[{suite_name}] Run {run_name} failed "
+            f"(attempt {retry_count + 1}/{retry_limit}), retrying"
+        )
+        # Back to Pending; the retry gets fresh Job names (attempt is hashed in)
+        _update_run_phase(
+            patch, run_matrix, run_name, "Pending",
+            extra={"retryCount": retry_count + 1,
+                   "benchmarkJobs": [], "statJobs": []},
+        )
+        _advance(suite_name, spec, status, patch)
+        return
+
+    logger.error(f"[{suite_name}] Run {run_name} failed")
+    _update_run_phase(patch, run_matrix, run_name, "Failed", end_time=_now())
+    _increment_summary(patch, status, failed=True)
+
+    if failure_policy == "abortAll":
+        patch.status["phase"] = "Failed"
+        logger.error(f"[{suite_name}] Aborting suite due to failed run")
+        return
+
+    # continueAndReport: keep going, suite ends Degraded
+    _advance(suite_name, spec, status, patch)
+
+
+def _advance(suite_name, spec, status, patch):
+    """
+    After a run finishes: sleep before the next run, start it now, or finish.
+
+    Sleeping is a persisted phase with a wake-up time (status.nextRunAt);
+    the suite timer moves it to Ready. Nothing blocks a handler thread.
+    """
+    run_matrix = patch.status.get("runMatrix") or status.get("runMatrix", [])
+    if not any(r["phase"] == "Pending" for r in run_matrix):
+        _finalize_suite(suite_name, None, spec, status, patch)
+        return
+
     sleep_secs = spec.get("execution", {}).get("sleepBetweenRuns", 30)
     if sleep_secs > 0:
+        wake_at = _utcnow() + timedelta(seconds=sleep_secs)
         patch.status["phase"] = "Sleeping"
+        patch.status["nextRunAt"] = wake_at.isoformat()
         logger.info(f"[{suite_name}] Sleeping {sleep_secs}s before next run")
-        time.sleep(sleep_secs)
-
-    _start_next_or_finish(suite_name, namespace, spec, status, patch, parse_results)
+    else:
+        patch.status["phase"] = "Ready"
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -459,6 +713,8 @@ def _prepare_databases(
     build_prepare_command: Callable[[dict, Optional[dict], str], Optional[list[str]]],
     benchmark_image: str,
     suite_kind: str,
+    owner: Optional[dict] = None,
+    run_key: str = "",
 ) -> bool:
     """
     Launch one prepare Job per database instance and block until all finish.
@@ -466,16 +722,16 @@ def _prepare_databases(
 
     Replaces the `-j prepare` invocation of run_database_workload-parallel.
     """
-    # Run names are too long to embed in a Job name alongside the instance name
-    suffix = hashlib.sha1(run_name.encode()).hexdigest()[:8]
     prepare_jobs = []
     for dep in deployments:
         command = build_prepare_command(params, prev_params, dep.get("ip", ""))
         if command is None:
             continue
-        job_name = f"{dep['name']}-prep-{suffix}"[:63]
-        # A leftover Job from an earlier attempt would be returned as-is by create_job
-        k8s.delete_job(job_name, namespace)
+        # Unique per suite instance, run and attempt, so a leftover Job is
+        # never picked up by create_job's 409 path
+        job_name = k8s.job_name(
+            f"{dep['name']}-prep", f"{run_key or run_name}/prep/{dep['name']}"
+        )
         k8s.create_job(
             name=job_name,
             namespace=namespace,
@@ -489,6 +745,8 @@ def _prepare_databases(
                 LABEL_ROLE:  "prepare",
             },
             resources=spec.get("database", {}).get("resources", {}),
+            owner=owner,
+            active_deadline_seconds=PREPARE_TIMEOUT_SECS,
         )
         prepare_jobs.append(job_name)
 
@@ -502,14 +760,14 @@ def _prepare_databases(
     deadline = time.time() + PREPARE_TIMEOUT_SECS
     while pending:
         for job_name in sorted(pending):
-            job_status = k8s.get_job_status(job_name, namespace)
-            if job_status["failed"]:
+            state = k8s.get_job_state(job_name, namespace)
+            if state in ("Failed", "Missing"):
                 logger.error(
-                    f"[{suite_name}] Prepare job {job_name} failed:\n"
+                    f"[{suite_name}] Prepare job {job_name} {state.lower()}:\n"
                     f"{k8s.get_job_pod_logs(job_name, namespace)[-2000:]}"
                 )
                 return False
-            if job_status["succeeded"]:
+            if state == "Complete":
                 pending.discard(job_name)
         if not pending:
             break
@@ -523,18 +781,6 @@ def _prepare_databases(
 
     logger.info(f"[{suite_name}] Data prepared for {run_name}")
     return True
-
-
-def _start_next_or_finish(
-    suite_name, namespace, spec, status, patch, parse_results
-):
-    """Check if there are more runs; if not, finalize."""
-    run_matrix = patch.status.get("runMatrix") or status.get("runMatrix", [])
-    remaining = [r for r in run_matrix if r["phase"] == "Pending"]
-    if remaining:
-        patch.status["phase"] = "Ready"  # triggers next run via phase watcher
-    else:
-        _finalize_suite(suite_name, namespace, spec, status, patch)
 
 
 def _finalize_suite(suite_name, namespace, spec, status, patch):
@@ -560,9 +806,15 @@ def _update_run_phase(
     end_time: Optional[str] = None,
     extra: Optional[dict] = None,
 ):
-    """Update a single run entry in the runMatrix status."""
+    """
+    Update a single run entry in the runMatrix status.
+
+    Starts from the runMatrix already in the patch, if any, so that several
+    calls in one handler accumulate instead of each starting over from the
+    original status (which used to drop startTime).
+    """
     updated = []
-    for run in run_matrix:
+    for run in (patch.status.get("runMatrix") or run_matrix):
         if run["name"] == run_name:
             run = {**run, "phase": phase}
             if start_time: run["startTime"]      = start_time
@@ -613,6 +865,17 @@ def _primary_metric(result: dict) -> str:
     return str(result)
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return _utcnow().isoformat()
+
+
+def _parse_time(value: str) -> datetime:
+    """Parse an ISO timestamp as written by _now() (or with a trailing Z)."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed

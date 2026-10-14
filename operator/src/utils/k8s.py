@@ -8,6 +8,7 @@ which keeps the API surface small and makes testing easier.
 Replaces the kubectl calls in the original bash scripts.
 """
 
+import hashlib
 import logging
 import time
 from typing import Optional
@@ -37,14 +38,24 @@ def load_config():
 
 
 def patch_suite_status(group: str, version: str, plural: str,
-                       name: str, namespace: str, status_patch: dict) -> None:
-    """Patch the status subresource of a namespaced custom resource."""
+                       name: str, namespace: str, status_patch: dict,
+                       resource_version: Optional[str] = None) -> None:
+    """
+    Patch the status subresource of a namespaced custom resource.
+
+    resource_version: if given, the patch only applies when the object is
+    still at that version; otherwise the API server returns 409 Conflict
+    (raised as ApiException). Used to claim a run exactly once when several
+    Job events race.
+    """
     load_config()
     from kubernetes import client
     api = client.CustomObjectsApi()
+    body = {"status": status_patch}
+    if resource_version:
+        body["metadata"] = {"resourceVersion": resource_version}
     api.patch_namespaced_custom_object_status(
-        group, version, namespace, plural, name,
-        {"status": status_patch},
+        group, version, namespace, plural, name, body,
     )
 
 def get_custom_resource(group: str, version: str, plural: str, name: str, namespace: str) -> dict:
@@ -343,6 +354,58 @@ def delete_deployment(name: str, namespace: str):
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────
 
+def job_name(prefix: str, key: str, max_len: int = 63) -> str:
+    """
+    Build a Job name that is unique per key and always fits in max_len.
+
+    The readable prefix is truncated if needed; uniqueness comes from a hash
+    of key, which callers build from the suite UID, run name and attempt.
+    Two suites with the same name, or two runs whose names only differ
+    past the truncation point, therefore never share a Job name.
+    """
+    digest = hashlib.sha1(key.encode()).hexdigest()[:10]
+    head = prefix[: max_len - len(digest) - 1].rstrip("-.")
+    return f"{head}-{digest}"
+
+
+def owner_reference(owner: dict) -> client.V1OwnerReference:
+    """
+    Owner reference pointing at a suite CR (kopf `body` or a fetched object).
+
+    Jobs owned by a suite are garbage-collected when the suite is deleted,
+    and their ownerReferences UID tells a stale Job (from an earlier suite
+    with the same name) apart from a current one.
+
+    blockOwnerDeletion is False so no extra RBAC on <plural>/finalizers is
+    needed and deleting a suite is never held up by its Jobs.
+    """
+    meta = owner["metadata"]
+    return client.V1OwnerReference(
+        api_version=owner["apiVersion"],
+        kind=owner["kind"],
+        name=meta["name"],
+        uid=meta["uid"],
+        controller=True,
+        block_owner_deletion=False,
+    )
+
+
+def parse_duration_secs(value: Optional[str], default: int) -> int:
+    """Parse a CRD duration like '30m' or '1h' (pattern ^[0-9]+(m|h)$)."""
+    if not value:
+        return default
+    value = str(value).strip()
+    try:
+        if value.endswith("h"):
+            return int(value[:-1]) * 3600
+        if value.endswith("m"):
+            return int(value[:-1]) * 60
+        return int(value)
+    except ValueError:
+        logger.warning(f"Unparseable duration {value!r}, using {default}s")
+        return default
+
+
 def create_job(
     name: str,
     namespace: str,
@@ -355,6 +418,8 @@ def create_job(
     host_network: bool = False,
     env_vars: Optional[dict] = None,
     ttl_seconds: int = 3600,
+    owner: Optional[dict] = None,
+    active_deadline_seconds: Optional[int] = None,
 ) -> client.V1Job:
     """
     Create a k8s Job.
@@ -364,6 +429,8 @@ def create_job(
     pvc_mounts: list of {"pvc_name": str, "mount_path": str, "read_only": bool}
     ttl_seconds: auto-clean up the Job object after completion (default 1h)
     host_network: True only for stat collector pods (original used hostNetwork: true)
+    owner: suite CR (kopf body) that owns the Job; sets ownerReferences
+    active_deadline_seconds: Job is marked Failed (DeadlineExceeded) after this
     """
     batch_v1 = client.BatchV1Api()
 
@@ -421,6 +488,7 @@ def create_job(
             name=name,
             namespace=namespace,
             labels=labels,
+            owner_references=[owner_reference(owner)] if owner else None,
         ),
         spec=client.V1JobSpec(
             template=client.V1PodTemplateSpec(
@@ -429,6 +497,7 @@ def create_job(
             ),
             backoff_limit=0,             # no retries at Job level; operator handles retries
             ttl_seconds_after_finished=ttl_seconds,
+            active_deadline_seconds=active_deadline_seconds,
         ),
     )
 
@@ -456,6 +525,39 @@ def get_job_status(name: str, namespace: str) -> dict:
         "failed":    job.status.failed or 0,
         "active":    job.status.active or 0,
     }
+
+
+def get_job_state(name: str, namespace: str) -> str:
+    """
+    Return "Complete", "Failed", "Active" or "Missing" for a Job.
+
+    Uses the terminal conditions rather than the pod counters, so a Job that
+    hit activeDeadlineSeconds counts as Failed even while its pod is still
+    being torn down. "Missing" means the Job is gone (deleted or TTL'd).
+    """
+    batch_v1 = client.BatchV1Api()
+    try:
+        job = batch_v1.read_namespaced_job(name, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return "Missing"
+        raise
+    return job_state_from_conditions(
+        [{"type": c.type, "status": c.status}
+         for c in (job.status.conditions or [])]
+    )
+
+
+def job_state_from_conditions(conditions: list[dict]) -> str:
+    """Map Job status.conditions (as dicts) to Complete / Failed / Active."""
+    for c in conditions or []:
+        if c.get("status") != "True":
+            continue
+        if c.get("type") == "Complete":
+            return "Complete"
+        if c.get("type") == "Failed":
+            return "Failed"
+    return "Active"
 
 
 def get_job_pod_logs(job_name: str, namespace: str) -> str:

@@ -41,6 +41,8 @@ def launch_stat_collectors(
     network_interfaces: Optional[dict] = None,  # {hostname: "eth0 eth1"}
     sds_devices: str = "",                      # "nvme0n1 nvme1n1"
     node_type: str = "worker",
+    owner: Optional[dict] = None,
+    name_key: str = "",
 ) -> dict[str, str]:
     """
     Launch one stat collector Job per worker node.
@@ -58,13 +60,21 @@ def launch_stat_collectors(
 
     node_type: "worker" or "sds" — passed to the container's run_all_scripts
       to distinguish which stats to collect.
+
+    owner: suite CR that owns the Jobs (garbage-collected with the suite).
+
+    name_key: makes Job names unique per suite instance and attempt
+      (suite UID / run name / retry count). Defaults to run_name.
     """
     jobs = {}
-    for node_name in worker_nodes:
-        job_name = f"stats-{node_type}-{run_name}-{node_name}"
-        # Truncate to k8s name limit (63 chars)
-        if len(job_name) > 63:
-            job_name = job_name[:63]
+    for i, node_name in enumerate(worker_nodes):
+        # Previously f"stats-{node_type}-{run_name}-{node_name}"[:63], which
+        # cut off the node name for long run names, so every node's collector
+        # got the same name and only the first one was created.
+        job_name = k8s.job_name(
+            f"stats-{node_type}-{i}",
+            f"{name_key or run_name}/stats/{node_type}/{node_name}",
+        )
 
         interfaces = ""
         if network_interfaces:
@@ -110,6 +120,7 @@ def launch_stat_collectors(
                 # Set to True via OCP Kustomize overlay if needed.
                 host_network=False,
                 ttl_seconds=7200,  # keep job for 2h after completion for log collection
+                owner=owner,
             )
             jobs[job_name] = node_name
             logger.info(f"Launched stat collector on {node_name}: {job_name}")
